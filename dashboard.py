@@ -26,6 +26,7 @@ from building_example import (
     analyze_seismic_risk,
     build_executive_summary,
     build_master_report,
+    combine_zoning_sources,
     generate_master_pdf_report,
     generate_pdf_report,
     get_bdong_code_map,
@@ -90,6 +91,15 @@ with st.sidebar:
         st.caption(_len_note)
         service_key = _key_stripped
 
+    vworld_key = st.text_input(
+        "브이월드(V-World) 인증키 (선택)",
+        value="",
+        type="password",
+        placeholder="용도지역/지구 상세 정보를 원하면 입력 (없어도 나머지 기능은 정상 동작)",
+        help="https://www.vworld.kr 에서 발급. 통합 리포트의 용도지역/지구 상세 조회에만 쓰입니다.",
+    )
+    vworld_key = vworld_key.strip() if vworld_key else None
+
     address = st.text_input("주소 (시/군/구 + 동)", value="성남시 분당구 백현동",
                              help="코드를 몰라도 동 이름으로 자동 검색됩니다.")
 
@@ -147,6 +157,7 @@ with tab_master:
                         months_lookback=months_lookback,
                         district_title_df=district_title_df,
                         sido=addr_sido, sigungu_name=addr_sigungu_name,
+                        vworld_key=vworld_key,
                     )
                 st.session_state.master = master
                 st.session_state.master_address_label = address
@@ -169,7 +180,7 @@ with tab_master:
             st.subheader("① 단일 조회 — 핵심 정보")
             addr = core.get("도로명대지위치") or core.get("대지위치", "")
             st.markdown(f"**{addr}** · {core.get('건물명', '') or '(건물명 없음)'}")
-            zoning = master.get("지역지구") or []
+            zoning = combine_zoning_sources(master)
             if zoning:
                 st.markdown(f"**용도지역/지구**: {', '.join(zoning)}")
             c1, c2, c3, c4 = st.columns(4)

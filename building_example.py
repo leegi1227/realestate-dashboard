@@ -772,6 +772,96 @@ def summarize_zoning(zoning_df: pd.DataFrame) -> list:
     return results
 
 
+# 브이월드 데이터 API의 용도지역/지구/구역 관련 레이어 (레이어코드, 표시명)
+_VWORLD_ZONING_LAYERS = [
+    ("LT_C_UQ111", "도시지역"),
+    ("LT_C_UQ112", "관리지역"),
+    ("LT_C_UQ113", "농림지역"),
+    ("LT_C_UQ114", "자연환경보전지역"),
+    ("LT_C_UQ121", "경관지구"),
+    ("LT_C_UQ123", "고도지구"),
+    ("LT_C_UQ124", "방화지구"),
+    ("LT_C_UQ125", "방재지구"),
+    ("LT_C_UQ126", "보호지구"),
+    ("LT_C_UQ127", "시설보호지구"),
+    ("LT_C_UQ128", "취락지구"),
+    ("LT_C_UQ129", "개발진흥지구"),
+    ("LT_C_UQ130", "특정용도제한지구"),
+    ("LT_C_UQ141", "국토계획구역"),
+    ("LT_C_UQ162", "도시자연공원구역"),
+    ("LT_C_UD801", "개발제한구역(그린벨트)"),
+]
+
+
+def geocode_address_vworld(vworld_key: str, address: str):
+    """도로명주소를 브이월드 주소검색 API로 좌표(경도, 위도)로 변환. 실패 시 None."""
+    url = "https://api.vworld.kr/req/address"
+    params = {
+        "service": "address", "request": "getcoord", "version": "2.0",
+        "crs": "epsg:4326", "key": vworld_key, "type": "ROAD", "address": address,
+    }
+    try:
+        res = requests.get(url, params=params, verify=False, timeout=10)
+        data = res.json()
+        point = data["response"]["result"]["point"]
+        return float(point["x"]), float(point["y"])
+    except Exception:
+        return None
+
+
+def get_vworld_zoning_detail(vworld_key: str, lon: float, lat: float, retries: int = 2) -> dict:
+    """좌표 지점이 속한 용도지역/지구/구역을 브이월드 데이터 API로 레이어별 조회.
+
+    반환값: {레이어명: [그 지점이 속한 구역명, ...]}. 레이어에 해당 사항이
+    없거나 (아직 승인이 덜 퍼졌거나 일시적 오류로) API 호출이 실패하면 그
+    레이어만 결과에서 조용히 생략된다 — 나머지 레이어 조회는 계속 진행된다.
+    """
+    url = "https://api.vworld.kr/req/data"
+    result = {}
+    for layer_code, label in _VWORLD_ZONING_LAYERS:
+        params = {
+            "key": vworld_key, "service": "data", "request": "GetFeature",
+            "data": layer_code, "geomFilter": f"POINT({lon} {lat})",
+            "size": 10, "page": 1,
+        }
+        data = None
+        for _ in range(retries):
+            try:
+                res = requests.get(url, params=params, verify=False, timeout=10)
+                candidate = res.json()
+                if candidate.get("response", {}).get("status") == "OK":
+                    data = candidate
+                    break
+            except Exception:
+                continue
+        if data is None:
+            continue
+
+        features = data["response"].get("result", {}).get("featureCollection", {}).get("features", [])
+        names = []
+        for feat in features:
+            props = feat.get("properties", {})
+            name = next((v for k, v in props.items() if "nm" in k.lower() and v), None)
+            if not name:
+                name = next((v for v in props.values() if isinstance(v, str) and v.strip()), None)
+            if name:
+                names.append(name)
+        if names:
+            result[label] = sorted(set(names))
+    return result
+
+
+def combine_zoning_sources(master: dict) -> list:
+    """건축HUB 표제부의 지역지구구역 + 브이월드 레이어 조회 결과를 하나의 중복 없는 목록으로 합침"""
+    combined = list(master.get("지역지구") or [])
+    vworld_detail = master.get("브이월드용도지역") or {}
+    for values in vworld_detail.values():
+        for v in values:
+            if v not in combined:
+                combined.append(v)
+    return combined
+
+
 # 표제부 주용도코드명 -> TransactionPrice property_type 추정 매핑
 _PROPERTY_TYPE_KEYWORDS = [
     (["아파트"], "아파트"),
@@ -869,8 +959,13 @@ def build_master_report(
     district_title_df: pd.DataFrame = None,
     sido: str = "",
     sigungu_name: str = "",
+    vworld_key: str = None,
 ) -> dict:
-    """지번 하나에 대해 단일조회·실거래가·노후도·내진·공시가격(+선택적 동단위 비교)을 한 번에 모은 종합 리포트"""
+    """지번 하나에 대해 단일조회·실거래가·노후도·내진·공시가격(+선택적 동단위 비교)을 한 번에 모은 종합 리포트
+
+    vworld_key를 넘기면 브이월드 데이터 API로 용도지역/지구/구역 상세(도시지역,
+    경관지구, 고도지구, 개발제한구역 등 15종 레이어)를 추가로 조회한다.
+    """
     result = {}
 
     title_df = get_building_ledger(api, ledger_type="표제부", sigungu_code=sigungu_code,
@@ -904,6 +999,14 @@ def build_master_report(
         bun=bun, ji=ji,
     )
     result["지역지구"] = summarize_zoning(zoning_df)
+
+    result["브이월드용도지역"] = {}
+    if vworld_key and title_df is not None and not title_df.empty:
+        addr_for_geocode = title_df.iloc[0].get("도로명대지위치") or title_df.iloc[0].get("대지위치")
+        if addr_for_geocode:
+            coord = geocode_address_vworld(vworld_key, addr_for_geocode)
+            if coord:
+                result["브이월드용도지역"] = get_vworld_zoning_detail(vworld_key, coord[0], coord[1])
 
     if district_title_df is not None and not district_title_df.empty:
         result["동단위통계"] = analyze_district_stats(district_title_df)
@@ -1137,7 +1240,7 @@ def build_executive_summary(master: dict) -> str:
     seismic_list = seismic.get("취약우선목록")
     seismic_label = seismic_list.iloc[0]["내진분류"] if seismic_list is not None and not seismic_list.empty else "내진 정보 미상"
 
-    zoning = master.get("지역지구") or []
+    zoning = combine_zoning_sources(master)
     zoning_clause = f" 용도지역/지구는 {', '.join(zoning)}입니다." if zoning else ""
 
     sentences = [
@@ -1231,7 +1334,7 @@ def generate_master_pdf_report(master: dict, address_label: str = "", title: str
     if core_src is not None:
         pairs = [(label, _clean(core_src.get(col, ""))) for col, label in _CORE_FIELD_LABELS]
         pairs = [(label, val) for label, val in pairs if val]
-        zoning = master.get("지역지구") or []
+        zoning = combine_zoning_sources(master)
         if zoning:
             pairs.insert(0, ("용도지역/지구", ", ".join(zoning)))
         if pairs:
