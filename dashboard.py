@@ -23,6 +23,7 @@ from PublicDataReader import BuildingLedger, TransactionPrice
 from building_example import (
     ALL_LEDGER_TYPES,
     add_address_column,
+    add_coordinates_column,
     add_pyeong_columns,
     add_standard_price_column,
     analyze_district_stats,
@@ -657,6 +658,14 @@ with tab_price:
     if tp_dong == "(전체)" and tp_with_reverse_match:
         st.caption("⚠️ 역매칭을 쓰려면 위에서 '동'을 특정 동으로 선택해주세요.")
 
+    tp_with_coords = st.checkbox(
+        "주소 좌표(위도/경도) 함께 조회 — 지도 표시용 (브이월드 인증키 필요, 고유 주소당 1회 호출)",
+        value=False, key="tp_with_coords", disabled=not vworld_key,
+        help="사이드바에 브이월드 인증키를 입력해야 사용할 수 있습니다.",
+    )
+    if not vworld_key and tp_with_coords:
+        st.caption("⚠️ 좌표 조회를 쓰려면 사이드바에 브이월드 인증키를 입력해주세요.")
+
     tp_period_mode = st.checkbox("기간으로 조회 (여러 달)", value=False, key="tp_period_mode")
     tp_start = tp_end = tp_year_month = None
     if tp_period_mode:
@@ -715,6 +724,17 @@ with tab_price:
                     else:
                         st.caption("마스킹된 지번이 없어 역매칭을 건너뜁니다.")
 
+                if tp_with_coords and vworld_key and not tp_df.empty and "주소" in tp_df.columns:
+                    coord_progress = st.progress(0.0, text="좌표 조회 준비 중...")
+
+                    def _on_coord_progress(i, total):
+                        coord_progress.progress(i / total, text=f"주소 좌표 조회 중... ({i}/{total} 고유 주소)")
+
+                    tp_df = add_coordinates_column(
+                        tp_df, vworld_key, progress_callback=_on_coord_progress,
+                    )
+                    coord_progress.empty()
+
                 st.session_state.tp_df = tp_df
             except Exception as e:
                 st.error(f"조회 실패: {e}")
@@ -739,6 +759,13 @@ with tab_price:
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             width='stretch', key="tp_xlsx",
         )
+
+        if "위도" in tp_df.columns and "경도" in tp_df.columns:
+            map_df = tp_df.dropna(subset=["위도", "경도"])
+            if not map_df.empty:
+                st.subheader("🗺️ 거래 위치 지도")
+                st.caption(f"좌표가 확인된 {len(map_df)}/{len(tp_df)}건을 표시합니다.")
+                render_address_map(map_df, lat_col="위도", lon_col="경도", label_col="주소")
 
 # ------------------------------------------------------------------
 # 탭 4: 동단위 통계

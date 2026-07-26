@@ -824,12 +824,16 @@ _VWORLD_ZONING_LAYERS = [
 ]
 
 
-def geocode_address_vworld(vworld_key: str, address: str):
-    """도로명주소를 브이월드 주소검색 API로 좌표(경도, 위도)로 변환. 실패 시 None."""
+def geocode_address_vworld(vworld_key: str, address: str, address_type: str = "ROAD"):
+    """도로명(ROAD) 또는 지번(PARCEL) 주소를 브이월드 주소검색 API로 좌표(경도, 위도)로
+
+    변환. 실패 시 None. 지번 주소를 넣을 땐 address_type="PARCEL"로 호출해야 한다
+    (도로명 파서로 지번 주소를 넣으면 대부분 인식하지 못한다).
+    """
     url = "https://api.vworld.kr/req/address"
     params = {
         "service": "address", "request": "getcoord", "version": "2.0",
-        "crs": "epsg:4326", "key": vworld_key, "type": "ROAD", "address": address,
+        "crs": "epsg:4326", "key": vworld_key, "type": address_type, "address": address,
     }
     try:
         res = requests.get(url, params=params, verify=False, timeout=10)
@@ -838,6 +842,43 @@ def geocode_address_vworld(vworld_key: str, address: str):
         return float(point["x"]), float(point["y"])
     except Exception:
         return None
+
+
+def add_coordinates_column(
+    df: pd.DataFrame,
+    vworld_key: str,
+    address_col: str = "주소",
+    progress_callback=None,
+    wait_time: float = 0.1,
+) -> pd.DataFrame:
+    """주소 컬럼(지번 주소)을 브이월드로 지오코딩해서 위도/경도 컬럼을 추가한다.
+
+    같은 지번이 여러 행(다른 계약일·층·호실 등)에 반복되는 경우가 많으므로,
+    고유 주소만 지오코딩해서 API 호출 횟수를 최소화한 뒤 원래 행에 매핑한다.
+    """
+    if df is None or df.empty or address_col not in df.columns:
+        return df
+
+    out = df.copy()
+    addr_series = out[address_col].astype(str)
+    unique_addrs = [a for a in addr_series.unique() if a and a.lower() != "nan"]
+
+    coord_map = {}
+    total = len(unique_addrs)
+    for i, addr in enumerate(unique_addrs, start=1):
+        # "237번지" -> "237": 지번주소 파서는 '번지' 접미사가 없는 쪽의 인식률이 더 높다.
+        geocode_addr = addr[:-2] if addr.endswith("번지") else addr
+        coord = geocode_address_vworld(vworld_key, geocode_addr, address_type="PARCEL")
+        if coord:
+            coord_map[addr] = coord
+        if progress_callback:
+            progress_callback(i, total)
+        if wait_time:
+            time.sleep(wait_time)
+
+    out["경도"] = addr_series.map(lambda a: coord_map.get(a, (None, None))[0])
+    out["위도"] = addr_series.map(lambda a: coord_map.get(a, (None, None))[1])
+    return out
 
 
 def get_vworld_zoning_detail(vworld_key: str, lon: float, lat: float, retries: int = 2) -> dict:
