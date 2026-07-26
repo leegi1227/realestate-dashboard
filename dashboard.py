@@ -114,6 +114,21 @@ def render_address_map(df: pd.DataFrame, lat_col: str = "lat", lon_col: str = "l
         plot_df["주소"] = plot_df[label_col].astype(str)
     else:
         plot_df["주소"] = "(주소 없음)"
+
+    # 완전히 같은 좌표(같은 지번의 서로 다른 거래 등)에 여러 행이 있으면 같은
+    # 주소 라벨이 여러 개 중복 생성되어, 겹침 해소 로직이 이들을 서로 멀리
+    # 떼어놓으면서 마커에서 동떨어져 보이는 원인이 된다. 좌표 단위로 하나만
+    # 남기고, 나머지 건수는 "외 N건"으로 같은 라벨에 표시한다.
+    dedup_key = list(zip(plot_df[lat_col].round(7), plot_df[lon_col].round(7)))
+    plot_df["_dedup_key"] = dedup_key
+    dup_counts = plot_df["_dedup_key"].value_counts()
+    plot_df = plot_df.drop_duplicates(subset="_dedup_key", keep="first").reset_index(drop=True)
+    plot_df["주소"] = [
+        f"{addr} 외 {dup_counts[key] - 1}건" if dup_counts[key] > 1 else addr
+        for addr, key in zip(plot_df["주소"], plot_df["_dedup_key"])
+    ]
+    plot_df = plot_df.drop(columns=["_dedup_key"])
+
     plot_df["icon_data"] = [_PIN_ICON_DATA] * len(plot_df)
 
     lat_min, lat_max = float(plot_df[lat_col].min()), float(plot_df[lat_col].max())
@@ -130,7 +145,7 @@ def render_address_map(df: pd.DataFrame, lat_col: str = "lat", lon_col: str = "l
         zoom=zoom,
     )
     _levels = _declutter_label_levels(plot_df[lat_col].tolist(), plot_df[lon_col].tolist(), zoom)
-    plot_df["label_offset"] = [[14, -28 - lvl * 20] for lvl in _levels]
+    plot_df["label_offset"] = [[12, -24 - lvl * 18] for lvl in _levels]
     icon_layer = pdk.Layer(
         "IconLayer",
         data=plot_df,
