@@ -420,7 +420,13 @@ def get_building_ledger(
     while True:
         params["pageNo"] = page
         res = requests.get(url, params=params, verify=False, timeout=15)
-        res_json = xmltodict.parse(res.text)
+        try:
+            res_json = xmltodict.parse(res.text)
+        except Exception:
+            raise Exception(
+                f"API가 XML이 아닌 응답을 반환했습니다 (HTTP {res.status_code}). "
+                f"응답 본문 일부: {res.text[:300]!r}"
+            )
         if not res_json.get("response"):
             raise Exception(f"API 요청이 실패했습니다: {res_json}")
         if res_json["response"]["header"]["resultCode"] != "00":
