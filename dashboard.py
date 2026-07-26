@@ -80,6 +80,15 @@ with st.sidebar:
         help="https://www.data.go.kr 에서 '건축HUB_건축물대장정보 서비스' 등을 활용신청하면 발급됩니다. "
              "이 키는 서버에 저장되지 않고 이 브라우저 세션에서만 사용됩니다.",
     )
+    if service_key:
+        _key_stripped = service_key.strip()
+        _len_note = f"입력된 키 길이: {len(service_key)}자"
+        if service_key != _key_stripped:
+            _len_note += " ⚠️ 앞/뒤에 공백이나 줄바꿈이 포함되어 있습니다!"
+        elif len(service_key) != 64:
+            _len_note += " ⚠️ 일반적인 키는 64자입니다. 다시 복사해보세요."
+        st.caption(_len_note)
+        service_key = _key_stripped
 
     address = st.text_input("주소 (시/군/구 + 동)", value="성남시 분당구 백현동",
                              help="코드를 몰라도 동 이름으로 자동 검색됩니다.")
