@@ -100,16 +100,45 @@ def _declutter_label_levels(lats, lons, zoom, label_width_px=260, row_height_px=
     return levels
 
 
+def _vworld_basemap_style(vworld_key: str) -> dict:
+    """브이월드 배경지도(WMTS) 타일을 쓰는 MapLibre 스타일 JSON을 만든다.
+
+    무료 Carto 배경지도는 오픈스트리트맵 기반이라 지역에 따라 건물 정보가
+    누락돼 보일 수 있다. 브이월드는 국토지리정보원의 공식 지도라 한국 건물
+    표시가 더 정확하다. react-map-gl(Streamlit 내장)은 mapStyle에 URL뿐
+    아니라 스타일 JSON 객체도 그대로 받을 수 있어 별도 지도 서비스 키(Mapbox 등)
+    없이도 커스텀 래스터 타일을 배경지도로 쓸 수 있다.
+    """
+    tile_url = f"https://api.vworld.kr/req/wmts/1.0.0/{vworld_key}/Base/{{z}}/{{y}}/{{x}}.png"
+    return {
+        "version": 8,
+        "sources": {
+            "vworld-base": {
+                "type": "raster",
+                "tiles": [tile_url],
+                "tileSize": 256,
+                "minzoom": 5,
+                "maxzoom": 19,
+                "attribution": "© VWorld",
+            }
+        },
+        "layers": [{"id": "vworld-base-layer", "type": "raster", "source": "vworld-base"}],
+    }
+
+
 def render_address_map(
     df: pd.DataFrame,
     lat_col: str = "lat",
     lon_col: str = "lon",
     label_col: str = None,
     show_labels: bool = True,
+    vworld_key: str = None,
 ):
     """지점을 구글 지도 스타일 핀으로 표시하고, show_labels=True면 핀 옆에 주소도 표시하는
 
     pydeck 지도. show_labels=False면 마커만 표시해 지점이 아주 많을 때 더 깔끔하게 볼 수 있다.
+    vworld_key가 있으면 배경지도를 무료 Carto(오픈스트리트맵 기반, 건물 누락 지역 있음)
+    대신 브이월드 공식 지도로 바꾼다.
 
     참고: 이전에는 radius_units="pixels"처럼 리터럴 문자열을 따옴표 없이 넘겨서
     pydeck이 이를 "@@=pixels"라는 (정의되지 않은 변수를 참조하는) JS 표현식으로
@@ -185,12 +214,27 @@ def render_address_map(
     )
     tooltip = {"html": "<b>{주소}</b>", "style": {"backgroundColor": "white", "color": "black"}}
     layers = [icon_layer, text_layer] if show_labels else [icon_layer]
-    st.pydeck_chart(pdk.Deck(
-        layers=layers,
-        initial_view_state=view_state,
-        tooltip=tooltip,
-        map_style=None,  # Streamlit 테마 기본 지도 스타일 사용 (Carto/Mapbox 키 불필요)
-    ))
+    if vworld_key:
+        # pydeck은 map_style을 dict로 주면 map_provider가 'mapbox'여야 한다고 자체 검증한다
+        # (Mapbox 전용 기능이라 가정하기 때문). 실제로는 Mapbox 토큰 없이 우리 스타일
+        # JSON(브이월드 래스터 타일)을 그대로 쓸 것이므로, 검증만 통과시킨 뒤 provider를
+        # maplibre로 바꿔서 Mapbox 관련 토큰 요구 로직을 타지 않게 한다.
+        deck = pdk.Deck(
+            layers=layers, initial_view_state=view_state, tooltip=tooltip,
+            map_provider="mapbox", map_style=_vworld_basemap_style(vworld_key),
+        )
+        deck.map_provider = "maplibre"
+        # Streamlit 프론트엔드가 mapStyle에 .indexOf()를 호출해서(문자열/배열 전제) 카르토
+        # 키 필요 여부를 판단한다 — 순수 객체를 그대로 넘기면 "indexOf is not a function"
+        # 에러가 난다(콘솔에서 확인). 배열로 감싸면 .indexOf도 되고, 실제 사용되는
+        # mapStyle[0] 값도 우리 스타일 객체 그대로 유지된다.
+        deck.map_style = [deck.map_style]
+    else:
+        deck = pdk.Deck(
+            layers=layers, initial_view_state=view_state, tooltip=tooltip,
+            map_style=None,  # Streamlit 테마 기본 지도 스타일 사용 (Carto/Mapbox 키 불필요)
+        )
+    st.pydeck_chart(deck)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -351,7 +395,7 @@ with tab_master:
             if coord:
                 render_address_map(
                     pd.DataFrame({"lat": [coord[1]], "lon": [coord[0]], "주소": [addr]}),
-                    label_col="주소",
+                    label_col="주소", vworld_key=vworld_key,
                 )
             elif vworld_key:
                 st.caption("좌표를 확인하지 못해 지도를 표시할 수 없습니다.")
@@ -789,7 +833,7 @@ with tab_price:
             if not map_df.empty:
                 st.subheader("🗺️ 거래 위치 지도")
                 st.caption(f"좌표가 확인된 {len(map_df)}/{len(tp_df)}건을 표시합니다.")
-                render_address_map(map_df, lat_col="위도", lon_col="경도", label_col="주소")
+                render_address_map(map_df, lat_col="위도", lon_col="경도", label_col="주소", vworld_key=vworld_key)
 
 # ------------------------------------------------------------------
 # 탭 4: 동단위 통계
@@ -985,7 +1029,10 @@ with tab_map:
                     help="지점이 많아 라벨이 복잡해 보이면 '마커만 표시'로 바꿔보세요.",
                 )
                 show_labels = bool(addr_col) and display_mode == "마커 + 주소 표시"
-                render_address_map(plot_df, label_col="주소" if addr_col else None, show_labels=show_labels)
+                render_address_map(
+                    plot_df, label_col="주소" if addr_col else None,
+                    show_labels=show_labels, vworld_key=vworld_key,
+                )
 
                 st.subheader("업로드한 데이터")
                 st.dataframe(add_pyeong_columns(map_df), width='stretch')
