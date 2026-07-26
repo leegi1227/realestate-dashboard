@@ -10,7 +10,9 @@ streamlit run dashboard.py
 http://localhost:8501 주소를 직접 열면 됩니다.
 """
 
+import base64
 import io
+import string
 
 import pandas as pd
 import pydeck as pdk
@@ -42,43 +44,70 @@ from building_example import (
 )
 
 
+_PIN_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <path d="M32 2C19 2 8 13 8 26c0 18 24 36 24 36s24-18 24-36C56 13 45 2 32 2z" fill="#DC2626" stroke="#FFFFFF" stroke-width="2"/>
+  <circle cx="32" cy="26" r="9" fill="#FFFFFF"/>
+</svg>"""
+_PIN_ICON_URL = "data:image/svg+xml;base64," + base64.b64encode(_PIN_SVG.encode("utf-8")).decode("ascii")
+# IconLayer는 각 행이 아이콘 정의(url/width/height/anchorY)를 담은 "icon_data" 컬럼을
+# 참조하는 방식이 pydeck 공식 예제 패턴이다. anchorY를 아이콘 높이와 같게 두면
+# 구글 지도 핀처럼 뾰족한 끝부분이 정확한 좌표를 가리키게 된다.
+_PIN_ICON_DATA = {"url": _PIN_ICON_URL, "width": 64, "height": 64, "anchorY": 64}
+
+
 def render_address_map(df: pd.DataFrame, lat_col: str = "lat", lon_col: str = "lon", label_col: str = None):
-    """지점을 정확한 위치에 작은 원형 마커로 표시하고, 마우스를 올리면
+    """지점을 구글 지도 스타일 핀으로 표시하고, 핀 옆에 주소를 항상 표시하는 pydeck 지도.
 
-    주소(label_col)가 툴팁으로 뜨는 pydeck 지도.
-
-    참고: 커스텀 SVG 아이콘(IconLayer)과 이모지 핀(TextLayer)을 모두 시도했으나
-    Streamlit에 내장된 deck.gl 번들에서 텍스처/폰트 아틀라스 생성 오류가 발생해
-    포기했다 — 대신 화면 픽셀 기준 고정 크기(줌과 무관하게 항상 작게 유지)의
-    원에 흰 테두리를 둘러 촘촘한 필지에서도 서로 겹치지 않고 각 지점이
-    또렷하게 구분되도록 했다.
+    참고: 이전에는 radius_units="pixels"처럼 리터럴 문자열을 따옴표 없이 넘겨서
+    pydeck이 이를 "@@=pixels"라는 (정의되지 않은 변수를 참조하는) JS 표현식으로
+    잘못 직렬화하는 버그 때문에 아이콘/텍스트 레이어가 모두 깨졌었다. 리터럴
+    문자열 값은 파이썬 문자열 안에 따옴표를 한 번 더 감싸서(예: '"start"')
+    넘겨야 pydeck이 accessor가 아닌 고정값으로 취급한다.
     """
     plot_df = df.copy()
     if label_col and label_col in plot_df.columns:
         plot_df["주소"] = plot_df[label_col].astype(str)
     else:
         plot_df["주소"] = "(주소 없음)"
+    plot_df["icon_data"] = [_PIN_ICON_DATA] * len(plot_df)
 
     view_state = pdk.ViewState(
         latitude=float(plot_df[lat_col].mean()),
         longitude=float(plot_df[lon_col].mean()),
         zoom=16 if len(plot_df) <= 1 else 15,
     )
-    layer = pdk.Layer(
-        "ScatterplotLayer",
+    icon_layer = pdk.Layer(
+        "IconLayer",
+        data=plot_df,
+        get_icon="icon_data",
+        get_position=f"[{lon_col}, {lat_col}]",
+        get_size=4,
+        size_scale=10,
+        pickable=True,
+    )
+    # TextLayer는 기본적으로 아스키 문자만 폰트 아틀라스에 포함시켜서, 한글처럼
+    # 기본 문자셋 밖의 글자는 조용히 안 그려진다(주소 뒷자리 번지 숫자만 보이던 원인).
+    # 실제 라벨에 쓰이는 문자를 모아 character_set으로 명시해야 한글이 제대로 나온다.
+    # 문자열 하나로(리스트가 아니라) 넘겨야 pydeck이 컬럼 접근자로 착각하지 않는다.
+    _address_chars = "".join(sorted(set("".join(plot_df["주소"].astype(str))))) + string.printable
+    text_layer = pdk.Layer(
+        "TextLayer",
         data=plot_df,
         get_position=f"[{lon_col}, {lat_col}]",
-        get_radius=8,
-        radius_units='"pixels"',  # 따옴표로 감싸야 pydeck이 리터럴로 취급함(안 감싸면 "@@=pixels"로 잘못 직렬화되어 반지름이 깨짐)
-        get_fill_color=[220, 38, 38, 230],
-        stroked=True,
-        get_line_color=[255, 255, 255, 255],
-        line_width_min_pixels=1.5,
-        pickable=True,
+        get_text="주소",
+        get_size=13,
+        get_color=[30, 30, 30, 255],
+        get_pixel_offset=[14, -28],
+        get_text_anchor='"start"',
+        get_alignment_baseline='"center"',
+        character_set='"' + _address_chars.replace('"', "") + '"',
+        background=True,
+        get_background_color=[255, 255, 255, 220],
+        pickable=False,
     )
     tooltip = {"html": "<b>{주소}</b>", "style": {"backgroundColor": "white", "color": "black"}}
     st.pydeck_chart(pdk.Deck(
-        layers=[layer],
+        layers=[icon_layer, text_layer],
         initial_view_state=view_state,
         tooltip=tooltip,
         map_style=None,  # Streamlit 테마 기본 지도 스타일 사용 (Carto/Mapbox 키 불필요)
