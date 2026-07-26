@@ -20,6 +20,7 @@ from PublicDataReader import BuildingLedger, TransactionPrice
 from building_example import (
     ALL_LEDGER_TYPES,
     add_address_column,
+    add_pyeong_columns,
     add_standard_price_column,
     analyze_district_stats,
     analyze_old_buildings,
@@ -42,10 +43,15 @@ from building_example import (
 
 
 def render_address_map(df: pd.DataFrame, lat_col: str = "lat", lon_col: str = "lon", label_col: str = None):
-    """지점을 지도에 표시하고, 마우스를 올리면 주소(label_col)가 툴팁으로 뜨는 pydeck 지도.
+    """지점을 정확한 위치에 작은 원형 마커로 표시하고, 마우스를 올리면
 
-    st.map()은 툴팁을 지원하지 않아, 마커에 주소를 보여줘야 하는 요구사항에는
-    Streamlit에 내장된 pydeck(별도 설치 불필요)을 대신 사용한다.
+    주소(label_col)가 툴팁으로 뜨는 pydeck 지도.
+
+    참고: 커스텀 SVG 아이콘(IconLayer)과 이모지 핀(TextLayer)을 모두 시도했으나
+    Streamlit에 내장된 deck.gl 번들에서 텍스처/폰트 아틀라스 생성 오류가 발생해
+    포기했다 — 대신 화면 픽셀 기준 고정 크기(줌과 무관하게 항상 작게 유지)의
+    원에 흰 테두리를 둘러 촘촘한 필지에서도 서로 겹치지 않고 각 지점이
+    또렷하게 구분되도록 했다.
     """
     plot_df = df.copy()
     if label_col and label_col in plot_df.columns:
@@ -56,19 +62,27 @@ def render_address_map(df: pd.DataFrame, lat_col: str = "lat", lon_col: str = "l
     view_state = pdk.ViewState(
         latitude=float(plot_df[lat_col].mean()),
         longitude=float(plot_df[lon_col].mean()),
-        zoom=15 if len(plot_df) <= 1 else 14,
+        zoom=16 if len(plot_df) <= 1 else 15,
     )
     layer = pdk.Layer(
         "ScatterplotLayer",
         data=plot_df,
         get_position=f"[{lon_col}, {lat_col}]",
-        get_radius=25,
-        radius_min_pixels=6,
-        get_fill_color=[220, 38, 38, 200],
+        get_radius=8,
+        radius_units='"pixels"',  # 따옴표로 감싸야 pydeck이 리터럴로 취급함(안 감싸면 "@@=pixels"로 잘못 직렬화되어 반지름이 깨짐)
+        get_fill_color=[220, 38, 38, 230],
+        stroked=True,
+        get_line_color=[255, 255, 255, 255],
+        line_width_min_pixels=1.5,
         pickable=True,
     )
     tooltip = {"html": "<b>{주소}</b>", "style": {"backgroundColor": "white", "color": "black"}}
-    st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip=tooltip))
+    st.pydeck_chart(pdk.Deck(
+        layers=[layer],
+        initial_view_state=view_state,
+        tooltip=tooltip,
+        map_style=None,  # Streamlit 테마 기본 지도 스타일 사용 (Carto/Mapbox 키 불필요)
+    ))
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -831,6 +845,6 @@ with tab_map:
                 render_address_map(plot_df, label_col="주소" if addr_col else None)
 
                 st.subheader("업로드한 데이터")
-                st.dataframe(map_df, width='stretch')
+                st.dataframe(add_pyeong_columns(map_df), width='stretch')
     else:
         st.info("파일을 업로드해주세요.")

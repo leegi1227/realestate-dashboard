@@ -351,6 +351,30 @@ def add_address_column(df: pd.DataFrame, sido: str = "", sigungu_name: str = "")
     return out
 
 
+_PYEONG_PER_SQM = 3.305785
+
+
+def add_pyeong_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """'㎡'(제곱미터)가 들어간 컬럼 바로 옆에 평 환산 컬럼을 추가한다.
+
+    1평 = 3.305785㎡ 기준으로 소수점 둘째 자리까지 반올림한다.
+    """
+    if df is None or df.empty:
+        return df
+
+    out = df.copy()
+    sqm_cols = [c for c in out.columns if "㎡" in str(c) or "제곱미터" in str(c)]
+    for col in sqm_cols:
+        pyeong_col = str(col).replace("㎡", "평").replace("제곱미터", "평")
+        if pyeong_col == col or pyeong_col in out.columns:
+            pyeong_col = f"{col}(평)"
+        vals = pd.to_numeric(out[col], errors="coerce")
+        insert_at = out.columns.get_loc(col) + 1
+        out.insert(insert_at, pyeong_col, (vals / _PYEONG_PER_SQM).round(2))
+
+    return out
+
+
 def get_building_ledger(
     api: BuildingLedger,
     ledger_type: str,
