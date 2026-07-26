@@ -12,6 +12,7 @@ http://localhost:8501 주소를 직접 열면 됩니다.
 
 import base64
 import io
+import math
 import string
 
 import pandas as pd
@@ -55,6 +56,49 @@ _PIN_ICON_URL = "data:image/svg+xml;base64," + base64.b64encode(_PIN_SVG.encode(
 _PIN_ICON_DATA = {"url": _PIN_ICON_URL, "width": 64, "height": 64, "anchorY": 64}
 
 
+def _mercator_pixel(lat: float, lon: float, zoom: float):
+    """위경도를 주어진 줌 레벨의 웹 메르카토르 화면 픽셀 좌표(256px 타일 기준)로 변환."""
+    lat_rad = math.radians(lat)
+    n = 2 ** zoom
+    x = (lon + 180.0) / 360.0 * n * 256
+    y = (1.0 - math.log(math.tan(lat_rad) + 1 / math.cos(lat_rad)) / math.pi) / 2.0 * n * 256
+    return x, y
+
+
+def _fit_zoom(lat_span: float, lon_span: float, width_px=850, height_px=420, min_zoom=13, max_zoom=18):
+    """지점들의 위경도 범위가 뷰포트에 적당히 들어차도록 줌 레벨을 역산한다.
+
+    지점이 서로 아주 가까우면(좁은 범위) 줌을 더 올려서 화면상 픽셀 간격을
+    벌려주고, 그만큼 라벨 겹침 해소(_declutter_label_levels)의 부담도 줄어든다.
+    """
+    lat_span = max(lat_span, 1e-5)
+    lon_span = max(lon_span, 1e-5)
+    zoom_lon = math.log2(width_px * 360.0 / (lon_span * 256.0))
+    zoom_lat = math.log2(height_px * 360.0 / (lat_span * 256.0))
+    return max(min_zoom, min(max_zoom, zoom_lon, zoom_lat))
+
+
+def _declutter_label_levels(lats, lons, zoom, label_width_px=260, row_height_px=20):
+    """겹치는 라벨을 세로로 쌓기 위한 단계(level)를 각 점마다 계산한다.
+
+    deck.gl의 CollisionFilterExtension은 Streamlit이 JSON API에 등록해 두지
+    않아 사용할 수 없었다(콘솔 에러로 확인) — 대신 렌더링에 쓰는 고정 줌
+    레벨 기준으로 각 점의 실제 화면 픽셀 위치를 계산해서, 라벨 영역이 겹치는
+    점들을 서로 다른 높이(level)에 배치하는 방식으로 정적으로 해결한다.
+    """
+    points = [_mercator_pixel(lat, lon, zoom) for lat, lon in zip(lats, lons)]
+    placed = []  # (x, y, level)
+    levels = []
+    for x, y in points:
+        level = 0
+        while any(lvl == level and abs(x - px) < label_width_px and abs(y - py) < row_height_px
+                   for px, py, lvl in placed):
+            level += 1
+        placed.append((x, y, level))
+        levels.append(level)
+    return levels
+
+
 def render_address_map(df: pd.DataFrame, lat_col: str = "lat", lon_col: str = "lon", label_col: str = None):
     """지점을 구글 지도 스타일 핀으로 표시하고, 핀 옆에 주소를 항상 표시하는 pydeck 지도.
 
@@ -71,11 +115,21 @@ def render_address_map(df: pd.DataFrame, lat_col: str = "lat", lon_col: str = "l
         plot_df["주소"] = "(주소 없음)"
     plot_df["icon_data"] = [_PIN_ICON_DATA] * len(plot_df)
 
+    lat_min, lat_max = float(plot_df[lat_col].min()), float(plot_df[lat_col].max())
+    lon_min, lon_max = float(plot_df[lon_col].min()), float(plot_df[lon_col].max())
+    center_lat, center_lon = (lat_min + lat_max) / 2, (lon_min + lon_max) / 2
+    if len(plot_df) <= 1:
+        zoom = 17
+    else:
+        # 여백 없이 딱 맞추면 가장자리 지점이 화면 밖으로 잘릴 수 있어 80% 여유를 둔다.
+        zoom = _fit_zoom((lat_max - lat_min) * 1.8, (lon_max - lon_min) * 1.8)
     view_state = pdk.ViewState(
-        latitude=float(plot_df[lat_col].mean()),
-        longitude=float(plot_df[lon_col].mean()),
-        zoom=16 if len(plot_df) <= 1 else 15,
+        latitude=center_lat,
+        longitude=center_lon,
+        zoom=zoom,
     )
+    _levels = _declutter_label_levels(plot_df[lat_col].tolist(), plot_df[lon_col].tolist(), zoom)
+    plot_df["label_offset"] = [[14, -28 - lvl * 20] for lvl in _levels]
     icon_layer = pdk.Layer(
         "IconLayer",
         data=plot_df,
@@ -97,7 +151,7 @@ def render_address_map(df: pd.DataFrame, lat_col: str = "lat", lon_col: str = "l
         get_text="주소",
         get_size=13,
         get_color=[30, 30, 30, 255],
-        get_pixel_offset=[14, -28],
+        get_pixel_offset="label_offset",
         get_text_anchor='"start"',
         get_alignment_baseline='"center"',
         character_set='"' + _address_chars.replace('"', "") + '"',
