@@ -848,33 +848,58 @@ def add_coordinates_column(
     df: pd.DataFrame,
     vworld_key: str,
     address_col: str = "주소",
+    reverse_match_col: str = "역매칭주소",
     progress_callback=None,
     wait_time: float = 0.1,
 ) -> pd.DataFrame:
-    """주소 컬럼(지번 주소)을 브이월드로 지오코딩해서 위도/경도 컬럼을 추가한다.
+    """주소(지번) 또는 역매칭된 주소를 브이월드로 지오코딩해서 위도/경도 컬럼을 추가한다.
 
-    같은 지번이 여러 행(다른 계약일·층·호실 등)에 반복되는 경우가 많으므로,
-    고유 주소만 지오코딩해서 API 호출 횟수를 최소화한 뒤 원래 행에 매핑한다.
+    지번이 마스킹된 상업용 거래는 '주소' 컬럼에 구체적인 번지가 없어(예:
+    "서울특별시 송파구 가락동") 그대로는 지오코딩되지 않는다. 역매칭
+    (reverse_match_transactions)으로 실제 주소가 확인된 행은 그 주소를 우선
+    쓴다 — 다만 역매칭주소는 도로명(도로명대지위치)일 수도, 지번(대지위치)일
+    수도 있고 후보가 여러 개(다수 인접후보, ';'로 구분)일 수도 있어서, 세미콜론이
+    있으면(모호한 다수 후보) 건너뛰고, 그 외엔 도로명으로 먼저 시도한 뒤 실패하면
+    지번으로 재시도한다. 같은 주소는 한 번만 지오코딩해서 API 호출을 최소화한다.
     """
     if df is None or df.empty or address_col not in df.columns:
         return df
 
     out = df.copy()
-    addr_series = out[address_col].astype(str)
-    unique_addrs = [a for a in addr_series.unique() if a and a.lower() != "nan"]
+    has_reverse = reverse_match_col in out.columns
+
+    def _target(row):
+        # (지오코딩에 쓸 주소, 주소 형식을 확신할 수 있는지) — 역매칭주소는
+        # 도로명/지번이 섞여 있어 형식을 모르니 둘 다 시도해야 하지만, '주소'
+        # 컬럼은 항상 지번 형식이라 확신할 수 있어 불필요한 API 호출을 줄인다.
+        if has_reverse:
+            rm = row[reverse_match_col]
+            if isinstance(rm, str) and rm.strip() and ";" not in rm:
+                return rm.strip(), False
+        addr = str(row[address_col])
+        addr = addr[:-2] if addr.endswith("번지") else addr  # "237번지" -> "237"
+        return addr, True
+
+    targets = [_target(row) for _, row in out.iterrows()]
+    unique_targets = sorted({t for t in targets if t[0] and t[0].lower() != "nan"})
 
     coord_map = {}
-    total = len(unique_addrs)
-    for i, addr in enumerate(unique_addrs, start=1):
-        # "237번지" -> "237": 지번주소 파서는 '번지' 접미사가 없는 쪽의 인식률이 더 높다.
-        geocode_addr = addr[:-2] if addr.endswith("번지") else addr
-        coord = geocode_address_vworld(vworld_key, geocode_addr, address_type="PARCEL")
+    total = len(unique_targets)
+    for i, (addr, is_parcel) in enumerate(unique_targets, start=1):
+        if is_parcel:
+            coord = geocode_address_vworld(vworld_key, addr, address_type="PARCEL")
+        else:
+            coord = geocode_address_vworld(vworld_key, addr, address_type="ROAD")
+            if not coord:
+                coord = geocode_address_vworld(vworld_key, addr, address_type="PARCEL")
         if coord:
-            coord_map[addr] = coord
+            coord_map[(addr, is_parcel)] = coord
         if progress_callback:
             progress_callback(i, total)
         if wait_time:
             time.sleep(wait_time)
+
+    addr_series = pd.Series(targets, index=out.index)
 
     out["경도"] = addr_series.map(lambda a: coord_map.get(a, (None, None))[0])
     out["위도"] = addr_series.map(lambda a: coord_map.get(a, (None, None))[1])
