@@ -352,12 +352,17 @@ def add_address_column(df: pd.DataFrame, sido: str = "", sigungu_name: str = "")
 
 
 _PYEONG_PER_SQM = 3.305785
+_UNIT_PRICE_KEYWORDS = ("가격", "단가", "금액", "시세")
 
 
 def add_pyeong_columns(df: pd.DataFrame) -> pd.DataFrame:
     """'㎡'(제곱미터)가 들어간 컬럼 바로 옆에 평 환산 컬럼을 추가한다.
 
-    1평 = 3.305785㎡ 기준으로 소수점 둘째 자리까지 반올림한다.
+    일반 면적 컬럼(예: '연면적(㎡)')은 평 = ㎡ ÷ 3.305785로 변환하지만,
+    '㎡당가격'처럼 단위가격을 담은 컬럼은 반대 방향(평당가격 = ㎡당가격 × 3.305785)
+    으로 계산해야 한다 — 평 하나가 3.305785㎡이므로 더 큰 단위(평)당 가격은
+    더 커야 한다. 컬럼명에 가격 관련 키워드가 있으면 단위가격으로 판단해서
+    곱셈으로, 아니면 순수 면적으로 보고 나눗셈으로 계산한다.
     """
     if df is None or df.empty:
         return df
@@ -369,8 +374,10 @@ def add_pyeong_columns(df: pd.DataFrame) -> pd.DataFrame:
         if pyeong_col == col or pyeong_col in out.columns:
             pyeong_col = f"{col}(평)"
         vals = pd.to_numeric(out[col], errors="coerce")
+        is_unit_price = any(k in str(col) for k in _UNIT_PRICE_KEYWORDS)
+        converted = vals * _PYEONG_PER_SQM if is_unit_price else vals / _PYEONG_PER_SQM
         insert_at = out.columns.get_loc(col) + 1
-        out.insert(insert_at, pyeong_col, (vals / _PYEONG_PER_SQM).round(2))
+        out.insert(insert_at, pyeong_col, converted.round(2))
 
     return out
 
