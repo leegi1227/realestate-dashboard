@@ -13,6 +13,7 @@ http://localhost:8501 주소를 직접 열면 됩니다.
 import io
 
 import pandas as pd
+import pydeck as pdk
 import streamlit as st
 from PublicDataReader import BuildingLedger, TransactionPrice
 
@@ -38,6 +39,36 @@ from building_example import (
     reverse_match_transactions,
     split_common_and_varying,
 )
+
+
+def render_address_map(df: pd.DataFrame, lat_col: str = "lat", lon_col: str = "lon", label_col: str = None):
+    """지점을 지도에 표시하고, 마우스를 올리면 주소(label_col)가 툴팁으로 뜨는 pydeck 지도.
+
+    st.map()은 툴팁을 지원하지 않아, 마커에 주소를 보여줘야 하는 요구사항에는
+    Streamlit에 내장된 pydeck(별도 설치 불필요)을 대신 사용한다.
+    """
+    plot_df = df.copy()
+    if label_col and label_col in plot_df.columns:
+        plot_df["주소"] = plot_df[label_col].astype(str)
+    else:
+        plot_df["주소"] = "(주소 없음)"
+
+    view_state = pdk.ViewState(
+        latitude=float(plot_df[lat_col].mean()),
+        longitude=float(plot_df[lon_col].mean()),
+        zoom=15 if len(plot_df) <= 1 else 14,
+    )
+    layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=plot_df,
+        get_position=f"[{lon_col}, {lat_col}]",
+        get_radius=25,
+        radius_min_pixels=6,
+        get_fill_color=[220, 38, 38, 200],
+        pickable=True,
+    )
+    tooltip = {"html": "<b>{주소}</b>", "style": {"backgroundColor": "white", "color": "black"}}
+    st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip=tooltip))
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -196,7 +227,10 @@ with tab_master:
 
             coord = master.get("좌표")
             if coord:
-                st.map(pd.DataFrame({"lat": [coord[1]], "lon": [coord[0]]}), size=30)
+                render_address_map(
+                    pd.DataFrame({"lat": [coord[1]], "lon": [coord[0]], "주소": [addr]}),
+                    label_col="주소",
+                )
             elif vworld_key:
                 st.caption("좌표를 확인하지 못해 지도를 표시할 수 없습니다.")
             else:
@@ -773,15 +807,18 @@ with tab_map:
         if map_df is not None:
             _lat_names = {"위도", "lat", "latitude", "y"}
             _lon_names = {"경도", "lon", "lng", "longitude", "x"}
+            _addr_names = {"주소", "address", "지번주소", "도로명주소"}
             lat_col = next((c for c in map_df.columns if str(c).strip().lower() in _lat_names), None)
             lon_col = next((c for c in map_df.columns if str(c).strip().lower() in _lon_names), None)
+            addr_col = next((c for c in map_df.columns if str(c).strip().lower() in _addr_names), None)
 
             if not lat_col or not lon_col:
                 st.error("위도/경도로 보이는 컬럼을 찾지 못했습니다. 아래 미리보기에서 컬럼명을 확인해주세요.")
                 st.dataframe(map_df.head(20), width='stretch')
             else:
-                plot_df = map_df[[lat_col, lon_col]].copy()
-                plot_df.columns = ["lat", "lon"]
+                cols = [lat_col, lon_col] + ([addr_col] if addr_col else [])
+                plot_df = map_df[cols].copy()
+                plot_df.columns = ["lat", "lon"] + (["주소"] if addr_col else [])
                 plot_df["lat"] = pd.to_numeric(plot_df["lat"], errors="coerce")
                 plot_df["lon"] = pd.to_numeric(plot_df["lon"], errors="coerce")
                 before = len(plot_df)
@@ -789,7 +826,9 @@ with tab_map:
                 dropped = before - len(plot_df)
 
                 st.success(f"{len(plot_df)}개 지점을 지도에 표시합니다." + (f" ({dropped}건은 좌표 형식이 올바르지 않아 제외)" if dropped else ""))
-                st.map(plot_df, size=20)
+                if not addr_col:
+                    st.caption("'주소' 컬럼이 없어 마커에 좌표만 표시됩니다. 주소를 툴팁으로 보려면 '주소' 컬럼을 포함해주세요.")
+                render_address_map(plot_df, label_col="주소" if addr_col else None)
 
                 st.subheader("업로드한 데이터")
                 st.dataframe(map_df, width='stretch')
