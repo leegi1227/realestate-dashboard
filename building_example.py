@@ -1001,11 +1001,13 @@ def build_master_report(
     result["지역지구"] = summarize_zoning(zoning_df)
 
     result["브이월드용도지역"] = {}
+    result["좌표"] = None
     if vworld_key and title_df is not None and not title_df.empty:
         addr_for_geocode = title_df.iloc[0].get("도로명대지위치") or title_df.iloc[0].get("대지위치")
         if addr_for_geocode:
             coord = geocode_address_vworld(vworld_key, addr_for_geocode)
             if coord:
+                result["좌표"] = coord
                 result["브이월드용도지역"] = get_vworld_zoning_detail(vworld_key, coord[0], coord[1])
 
     if district_title_df is not None and not district_title_df.empty:

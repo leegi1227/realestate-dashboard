@@ -193,6 +193,14 @@ with tab_master:
             c6.metric("연면적(㎡)", core.get("연면적", "-"))
             c7.metric("건폐율(%)", core.get("건폐율", "-"))
             c8.metric("용적률(%)", core.get("용적률", "-"))
+
+            coord = master.get("좌표")
+            if coord:
+                st.map(pd.DataFrame({"lat": [coord[1]], "lon": [coord[0]]}), size=30)
+            elif vworld_key:
+                st.caption("좌표를 확인하지 못해 지도를 표시할 수 없습니다.")
+            else:
+                st.caption("브이월드 인증키를 입력하면 이 위치를 지도에 표시합니다.")
         else:
             st.warning("표제부 조회 결과가 없습니다 — 주소/번지를 확인해주세요.")
 
