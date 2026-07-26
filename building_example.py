@@ -851,6 +851,7 @@ def add_coordinates_column(
     reverse_match_col: str = "역매칭주소",
     progress_callback=None,
     wait_time: float = 0.1,
+    assume_parcel: bool = True,
 ) -> pd.DataFrame:
     """주소(지번) 또는 역매칭된 주소를 브이월드로 지오코딩해서 위도/경도 컬럼을 추가한다.
 
@@ -861,6 +862,11 @@ def add_coordinates_column(
     수도 있고 후보가 여러 개(다수 인접후보, ';'로 구분)일 수도 있어서, 세미콜론이
     있으면(모호한 다수 후보) 건너뛰고, 그 외엔 도로명으로 먼저 시도한 뒤 실패하면
     지번으로 재시도한다. 같은 주소는 한 번만 지오코딩해서 API 호출을 최소화한다.
+
+    assume_parcel=True(기본값)면 address_col은 항상 지번 형식이라고 보고 지번으로만
+    조회한다(실거래가 탭처럼 형식을 확신할 수 있을 때 API 호출을 아낀다). 사용자가
+    직접 입력/업로드한 주소처럼 도로명인지 지번인지 모를 땐 assume_parcel=False로
+    두면 도로명으로 먼저 시도한 뒤 실패 시 지번으로 재시도한다.
     """
     if df is None or df.empty or address_col not in df.columns:
         return df
@@ -871,14 +877,15 @@ def add_coordinates_column(
     def _target(row):
         # (지오코딩에 쓸 주소, 주소 형식을 확신할 수 있는지) — 역매칭주소는
         # 도로명/지번이 섞여 있어 형식을 모르니 둘 다 시도해야 하지만, '주소'
-        # 컬럼은 항상 지번 형식이라 확신할 수 있어 불필요한 API 호출을 줄인다.
+        # 컬럼은 (assume_parcel=True인 한) 항상 지번 형식이라 확신할 수 있어
+        # 불필요한 API 호출을 줄인다.
         if has_reverse:
             rm = row[reverse_match_col]
             if isinstance(rm, str) and rm.strip() and ";" not in rm:
                 return rm.strip(), False
         addr = str(row[address_col])
         addr = addr[:-2] if addr.endswith("번지") else addr  # "237번지" -> "237"
-        return addr, True
+        return addr, assume_parcel
 
     targets = [_target(row) for _, row in out.iterrows()]
     unique_targets = sorted({t for t in targets if t[0] and t[0].lower() != "nan"})

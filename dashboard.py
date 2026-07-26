@@ -35,6 +35,7 @@ from building_example import (
     combine_zoning_sources,
     generate_master_pdf_report,
     generate_pdf_report,
+    geocode_address_vworld,
     get_bdong_code_map,
     get_building_ledger,
     get_dong_list,
@@ -316,9 +317,10 @@ def _resolve_codes():
     return sigungu_code, bdong_code, row["시도명"], row["시군구명"]
 
 
-tab_master, tab_single, tab_report, tab_price, tab_district, tab_old, tab_seismic, tab_priceh, tab_map = st.tabs([
+tab_master, tab_single, tab_report, tab_price, tab_district, tab_old, tab_seismic, tab_priceh, tab_map, tab_geocode = st.tabs([
     "🏆 통합 리포트", "🔍 단일 조회", "📋 종합 리포트", "💰 실거래가",
     "📊 동단위 통계", "🏚️ 노후건축물", "🧱 내진 취약 스캔", "💹 공시가격 시계열", "🗺️ 지도 업로드",
+    "📍 지오코딩",
 ])
 
 # ------------------------------------------------------------------
@@ -1038,3 +1040,90 @@ with tab_map:
                 st.dataframe(add_pyeong_columns(map_df), width='stretch')
     else:
         st.info("파일을 업로드해주세요.")
+
+# ------------------------------------------------------------------
+# 탭 9: 지오코딩 — 주소만 넣으면 경도·위도만 반환
+# ------------------------------------------------------------------
+with tab_geocode:
+    st.write("**주소**를 입력하면 경도·위도 좌표만 조회합니다. 도로명·지번 주소 모두 지원합니다.")
+    if not vworld_key:
+        st.warning("사이드바에 브이월드(V-World) 인증키를 입력해야 사용할 수 있습니다.")
+    else:
+        st.subheader("🔍 단일 주소 검색")
+        single_addr = st.text_input(
+            "주소", placeholder="예: 서울특별시 강남구 테헤란로 152  또는  서울특별시 강남구 역삼동 737",
+            key="geo_single_addr",
+        )
+        if st.button("좌표 찾기", type="primary", key="geo_single_submit"):
+            addr = single_addr.strip()
+            if not addr:
+                st.warning("주소를 입력해주세요.")
+            else:
+                with st.spinner("조회 중..."):
+                    coord = geocode_address_vworld(vworld_key, addr, address_type="ROAD")
+                    if not coord:
+                        coord = geocode_address_vworld(vworld_key, addr, address_type="PARCEL")
+                st.session_state.geo_single_result = (addr, coord)
+
+        single_result = st.session_state.get("geo_single_result")
+        if single_result:
+            found_addr, coord = single_result
+            if coord:
+                lon, lat = coord
+                c1, c2 = st.columns(2)
+                c1.metric("경도 (lon)", f"{lon:.6f}")
+                c2.metric("위도 (lat)", f"{lat:.6f}")
+                render_address_map(
+                    pd.DataFrame({"lat": [lat], "lon": [lon], "주소": [found_addr]}),
+                    label_col="주소", vworld_key=vworld_key,
+                )
+            else:
+                st.error("좌표를 찾지 못했습니다. 주소를 다시 확인해주세요.")
+
+        st.divider()
+        st.subheader("📄 파일 일괄 변환")
+        st.caption("'주소' 컬럼이 포함된 CSV/엑셀 파일을 올리면 각 행의 경도·위도를 찾아 추가합니다.")
+        geo_file = st.file_uploader("파일 업로드", type=["csv", "xlsx", "xls"], key="geo_file_upload")
+
+        if geo_file is not None:
+            try:
+                if geo_file.name.lower().endswith(".csv"):
+                    geo_df = pd.read_csv(geo_file)
+                else:
+                    geo_df = pd.read_excel(geo_file)
+            except Exception as e:
+                st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
+                geo_df = None
+
+            if geo_df is not None:
+                _addr_names = {"주소", "address", "지번주소", "도로명주소"}
+                addr_col = next((c for c in geo_df.columns if str(c).strip().lower() in _addr_names), None)
+                if not addr_col:
+                    st.error("주소로 보이는 컬럼을 찾지 못했습니다. 컬럼명을 '주소'로 바꿔서 다시 올려주세요.")
+                    st.dataframe(geo_df.head(20), width='stretch')
+                else:
+                    if st.button("전체 좌표 조회", type="primary", key="geo_batch_submit"):
+                        work_df = geo_df[[addr_col]].rename(columns={addr_col: "주소"})
+                        geo_progress = st.progress(0.0, text="지오코딩 준비 중...")
+
+                        def _on_geo_progress(i, total):
+                            geo_progress.progress(i / total, text=f"좌표 조회 중... ({i}/{total} 고유 주소)")
+
+                        st.session_state.geo_batch_result = add_coordinates_column(
+                            work_df, vworld_key, progress_callback=_on_geo_progress, assume_parcel=False,
+                        )
+                        geo_progress.empty()
+
+        batch_result = st.session_state.get("geo_batch_result")
+        if batch_result is not None:
+            found = int(batch_result["위도"].notna().sum())
+            st.success(f"{found}/{len(batch_result)}건 좌표를 찾았습니다.")
+            st.dataframe(batch_result, width='stretch')
+            csv_bytes = batch_result.to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                "📄 CSV 다운로드", csv_bytes, "geocoded_addresses.csv", "text/csv",
+                width='stretch', key="geo_batch_csv",
+            )
+            map_df = batch_result.dropna(subset=["위도", "경도"])
+            if not map_df.empty:
+                render_address_map(map_df, label_col="주소", vworld_key=vworld_key)
