@@ -100,8 +100,16 @@ def _declutter_label_levels(lats, lons, zoom, label_width_px=260, row_height_px=
     return levels
 
 
-def render_address_map(df: pd.DataFrame, lat_col: str = "lat", lon_col: str = "lon", label_col: str = None):
-    """지점을 구글 지도 스타일 핀으로 표시하고, 핀 옆에 주소를 항상 표시하는 pydeck 지도.
+def render_address_map(
+    df: pd.DataFrame,
+    lat_col: str = "lat",
+    lon_col: str = "lon",
+    label_col: str = None,
+    show_labels: bool = True,
+):
+    """지점을 구글 지도 스타일 핀으로 표시하고, show_labels=True면 핀 옆에 주소도 표시하는
+
+    pydeck 지도. show_labels=False면 마커만 표시해 지점이 아주 많을 때 더 깔끔하게 볼 수 있다.
 
     참고: 이전에는 radius_units="pixels"처럼 리터럴 문자열을 따옴표 없이 넘겨서
     pydeck이 이를 "@@=pixels"라는 (정의되지 않은 변수를 참조하는) JS 표현식으로
@@ -176,8 +184,9 @@ def render_address_map(df: pd.DataFrame, lat_col: str = "lat", lon_col: str = "l
         pickable=False,
     )
     tooltip = {"html": "<b>{주소}</b>", "style": {"backgroundColor": "white", "color": "black"}}
+    layers = [icon_layer, text_layer] if show_labels else [icon_layer]
     st.pydeck_chart(pdk.Deck(
-        layers=[icon_layer, text_layer],
+        layers=layers,
         initial_view_state=view_state,
         tooltip=tooltip,
         map_style=None,  # Streamlit 테마 기본 지도 스타일 사용 (Carto/Mapbox 키 불필요)
@@ -967,7 +976,16 @@ with tab_map:
                 st.success(f"{len(plot_df)}개 지점을 지도에 표시합니다." + (f" ({dropped}건은 좌표 형식이 올바르지 않아 제외)" if dropped else ""))
                 if not addr_col:
                     st.caption("'주소' 컬럼이 없어 마커에 좌표만 표시됩니다. 주소를 툴팁으로 보려면 '주소' 컬럼을 포함해주세요.")
-                render_address_map(plot_df, label_col="주소" if addr_col else None)
+
+                display_mode = st.selectbox(
+                    "지도 표시 방식",
+                    ["마커 + 주소 표시", "마커만 표시"],
+                    key="map_display_mode",
+                    disabled=not addr_col,
+                    help="지점이 많아 라벨이 복잡해 보이면 '마커만 표시'로 바꿔보세요.",
+                )
+                show_labels = bool(addr_col) and display_mode == "마커 + 주소 표시"
+                render_address_map(plot_df, label_col="주소" if addr_col else None, show_labels=show_labels)
 
                 st.subheader("업로드한 데이터")
                 st.dataframe(add_pyeong_columns(map_df), width='stretch')
