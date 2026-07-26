@@ -169,6 +169,9 @@ with tab_master:
             st.subheader("① 단일 조회 — 핵심 정보")
             addr = core.get("도로명대지위치") or core.get("대지위치", "")
             st.markdown(f"**{addr}** · {core.get('건물명', '') or '(건물명 없음)'}")
+            zoning = master.get("지역지구") or []
+            if zoning:
+                st.markdown(f"**용도지역/지구**: {', '.join(zoning)}")
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("주용도", core.get("주용도코드명", "-"))
             c2.metric("구조", core.get("구조코드명", "-"))

@@ -750,6 +750,28 @@ def analyze_price_history(price_df: pd.DataFrame, top_units: int = 10) -> dict:
     return {"단위목록": units[:top_units], "경고": PRICE_HISTORY_WARNING}
 
 
+def summarize_zoning(zoning_df: pd.DataFrame) -> list:
+    """지역지구구역 표에서 중복을 제거한 용도지역/지구/구역 목록을 문자열 리스트로 반환.
+
+    같은 필지라도 세대(관리건축물대장PK)마다 행이 반복 등록돼 있어(예: 아파트 한
+    단지가 59행) 그대로 보여주면 의미 없이 길어지므로, 구분·코드명 조합으로
+    중복 제거한다.
+    """
+    if zoning_df is None or zoning_df.empty:
+        return []
+    cols = [c for c in ["지역지구구역구분코드명", "지역지구구역코드명"] if c in zoning_df.columns]
+    if not cols:
+        return []
+    unique = zoning_df[cols].drop_duplicates()
+    results = []
+    for _, row in unique.iterrows():
+        name = str(row.get("지역지구구역코드명", "") or "").strip()
+        if not name or name.lower() == "none":
+            continue
+        results.append(name)
+    return results
+
+
 # 표제부 주용도코드명 -> TransactionPrice property_type 추정 매핑
 _PROPERTY_TYPE_KEYWORDS = [
     (["아파트"], "아파트"),
@@ -877,6 +899,12 @@ def build_master_report(
     )
     result["공시가격"] = analyze_price_history(price_df, top_units=10)
 
+    zoning_df = get_building_ledger(
+        api, ledger_type="지역지구구역", sigungu_code=sigungu_code, bdong_code=bdong_code,
+        bun=bun, ji=ji,
+    )
+    result["지역지구"] = summarize_zoning(zoning_df)
+
     if district_title_df is not None and not district_title_df.empty:
         result["동단위통계"] = analyze_district_stats(district_title_df)
     else:
@@ -945,7 +973,7 @@ _MULTIROW_KEEP_COLS = {
     "층별개요": ["층번호명", "면적", "주용도코드명", "기타용도"],
     "전유공용면적": ["호명칭", "층번호명", "전유공용구분코드명", "면적"],
     "부속지번": ["지번주소", "부속대장구분코드명"],
-    "지역지구구역": ["지역지구구역코드명", "지구코드명", "구역코드명"],
+    "지역지구구역": ["지역지구구역구분코드명", "지역지구구역코드명"],
 }
 
 # 한 줄 요약으로만 보여줄 소규모 항목: {대장종류: [원본컬럼, ...]}
@@ -1109,11 +1137,15 @@ def build_executive_summary(master: dict) -> str:
     seismic_list = seismic.get("취약우선목록")
     seismic_label = seismic_list.iloc[0]["내진분류"] if seismic_list is not None and not seismic_list.empty else "내진 정보 미상"
 
+    zoning = master.get("지역지구") or []
+    zoning_clause = f" 용도지역/지구는 {', '.join(zoning)}입니다." if zoning else ""
+
     sentences = [
         f"이 건물은 {purpose}(구조: {structure})로, "
         + (f"{approval_year}년 준공되어 약 {age}년이 경과했습니다." if approval_year and age is not None
            else "준공연도가 명확하지 않습니다.")
         + f" 내진 분류는 '{seismic_label}'입니다."
+        + zoning_clause
     ]
 
     tx = master.get("실거래가") or {}
@@ -1199,6 +1231,9 @@ def generate_master_pdf_report(master: dict, address_label: str = "", title: str
     if core_src is not None:
         pairs = [(label, _clean(core_src.get(col, ""))) for col, label in _CORE_FIELD_LABELS]
         pairs = [(label, val) for label, val in pairs if val]
+        zoning = master.get("지역지구") or []
+        if zoning:
+            pairs.insert(0, ("용도지역/지구", ", ".join(zoning)))
         if pairs:
             section_title("① 단일 조회 — 핵심 정보")
             rows = [pairs[i:i + 2] for i in range(0, len(pairs), 2)]
