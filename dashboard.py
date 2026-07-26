@@ -119,9 +119,9 @@ def _resolve_codes():
     return sigungu_code, bdong_code, row["시도명"], row["시군구명"]
 
 
-tab_master, tab_single, tab_report, tab_price, tab_district, tab_old, tab_seismic, tab_priceh = st.tabs([
+tab_master, tab_single, tab_report, tab_price, tab_district, tab_old, tab_seismic, tab_priceh, tab_map = st.tabs([
     "🏆 통합 리포트", "🔍 단일 조회", "📋 종합 리포트", "💰 실거래가",
-    "📊 동단위 통계", "🏚️ 노후건축물", "🧱 내진 취약 스캔", "💹 공시가격 시계열",
+    "📊 동단위 통계", "🏚️ 노후건축물", "🧱 내진 취약 스캔", "💹 공시가격 시계열", "🗺️ 지도 업로드",
 ])
 
 # ------------------------------------------------------------------
@@ -750,3 +750,48 @@ with tab_priceh:
                 f"총증감 {unit['총증감률(%)']}% · 연평균(CAGR) {unit['연평균상승률CAGR(%)']}%"
             )
             st.line_chart(unit["추이"].set_index("연도"))
+
+# ------------------------------------------------------------------
+# 탭 8: 지도 업로드 — 주소·위도·경도가 담긴 파일을 올리면 지도에 표시
+# ------------------------------------------------------------------
+with tab_map:
+    st.write("**주소·위도·경도** 컬럼이 포함된 CSV 또는 엑셀 파일을 업로드하면 모든 지점을 지도에 표시합니다.")
+    st.caption("위도 컬럼명 예시: 위도, lat, latitude, y  ·  경도 컬럼명 예시: 경도, lon, lng, longitude, x")
+
+    uploaded = st.file_uploader("파일 업로드", type=["csv", "xlsx", "xls"], key="map_upload")
+
+    if uploaded is not None:
+        try:
+            if uploaded.name.lower().endswith(".csv"):
+                map_df = pd.read_csv(uploaded)
+            else:
+                map_df = pd.read_excel(uploaded)
+        except Exception as e:
+            st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
+            map_df = None
+
+        if map_df is not None:
+            _lat_names = {"위도", "lat", "latitude", "y"}
+            _lon_names = {"경도", "lon", "lng", "longitude", "x"}
+            lat_col = next((c for c in map_df.columns if str(c).strip().lower() in _lat_names), None)
+            lon_col = next((c for c in map_df.columns if str(c).strip().lower() in _lon_names), None)
+
+            if not lat_col or not lon_col:
+                st.error("위도/경도로 보이는 컬럼을 찾지 못했습니다. 아래 미리보기에서 컬럼명을 확인해주세요.")
+                st.dataframe(map_df.head(20), width='stretch')
+            else:
+                plot_df = map_df[[lat_col, lon_col]].copy()
+                plot_df.columns = ["lat", "lon"]
+                plot_df["lat"] = pd.to_numeric(plot_df["lat"], errors="coerce")
+                plot_df["lon"] = pd.to_numeric(plot_df["lon"], errors="coerce")
+                before = len(plot_df)
+                plot_df = plot_df.dropna(subset=["lat", "lon"])
+                dropped = before - len(plot_df)
+
+                st.success(f"{len(plot_df)}개 지점을 지도에 표시합니다." + (f" ({dropped}건은 좌표 형식이 올바르지 않아 제외)" if dropped else ""))
+                st.map(plot_df, size=20)
+
+                st.subheader("업로드한 데이터")
+                st.dataframe(map_df, width='stretch')
+    else:
+        st.info("파일을 업로드해주세요.")
