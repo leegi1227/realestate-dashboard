@@ -1,0 +1,24 @@
+# 참고용으로 받아둔 원본 소스/자료 (배포에 불필요)
+PublicDataReader-main/
+PublicDataReader-main.zip
+archhub-mcp-main/
+archhub-mcp-main*.zip
+deal-locator-mcp-main/
+deal-locator-mcp-main.zip
+건축HUB_가이드/
+OpenAPI활용가이드*.zip
+
+# 테스트 중 생성된 산출물 (실제 조회 데이터가 들어있을 수 있어 커밋 금지)
+test_*.pdf
+*.pkl
+building_result.xlsx
+*.png
+
+# 파이썬 캐시
+__pycache__/
+*.pyc
+
+# 로컬 비밀키/환경변수
+.env
+.env.local
+.streamlit/secrets.toml
