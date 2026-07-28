@@ -834,17 +834,32 @@ def geocode_address_vworld(vworld_key: str, address: str, address_type: str = "R
     "인증키가 잘못됨"과 "주소를 못 찾음"을 구분할 수 있다 — 이전에는 모든 실패를
     조용히 None으로 뭉개서, 키가 무효화됐거나 일일 호출 한도를 넘긴 경우에도
     "주소가 이상해서 그런가?" 하고 엉뚱한 곳을 의심하게 만들었다.
+
+    Streamlit Cloud처럼 공유 아웃바운드 IP를 쓰는 호스팅 환경에서는 브이월드가
+    간헐적으로 연결을 끊거나(RemoteDisconnected) 빈 응답을 주는 경우가 관찰돼
+    (같은 배치 안에서도 성공/실패가 섞임 — IP 차단이라면 매번 같은 형태로 실패해야
+    하므로 일시적 네트워크 문제로 보임), 요청 자체가 실패했을 때만(정상 응답으로
+    ERROR/NOT_FOUND를 받은 경우는 재시도하지 않음) 짧게 재시도한다.
     """
     url = "https://api.vworld.kr/req/address"
     params = {
         "service": "address", "request": "getcoord", "version": "2.0",
         "crs": "epsg:4326", "key": vworld_key, "type": address_type, "address": address,
     }
-    try:
-        res = requests.get(url, params=params, verify=False, timeout=10)
-        data = res.json()
-    except Exception as e:
-        return None, f"요청 실패: {e}"
+    last_error = None
+    data = None
+    for attempt in range(3):
+        try:
+            res = requests.get(url, params=params, verify=False, timeout=10)
+            data = res.json()
+            last_error = None
+            break
+        except Exception as e:
+            last_error = e
+            if attempt < 2:
+                time.sleep(0.6 * (attempt + 1))
+    if last_error is not None:
+        return None, f"요청 실패(재시도 3회 실패): {last_error}"
 
     response = data.get("response", {})
     status = response.get("status")
