@@ -134,6 +134,8 @@ def render_address_map(
     label_col: str = None,
     show_labels: bool = True,
     vworld_key: str = None,
+    enable_selection: bool = False,
+    selection_key: str = None,
 ):
     """지점을 구글 지도 스타일 핀으로 표시하고, show_labels=True면 핀 옆에 주소도 표시하는
 
@@ -146,6 +148,11 @@ def render_address_map(
     잘못 직렬화하는 버그 때문에 아이콘/텍스트 레이어가 모두 깨졌었다. 리터럴
     문자열 값은 파이썬 문자열 안에 따옴표를 한 번 더 감싸서(예: '"start"')
     넘겨야 pydeck이 accessor가 아닌 고정값으로 취급한다.
+
+    enable_selection=True면 마커 클릭을 감지해서, 클릭된 지점의 데이터(주소/lat/lon이
+    담긴 dict)를 반환한다(클릭이 없으면 None). st.pydeck_chart의 on_select 기능은
+    선택 상태를 유지하려면 레이어에 고유 id가 있어야 해서, 이 함수는 항상 레이어에
+    id를 붙인다 — enable_selection=False일 때도 id 자체는 무해하다.
     """
     plot_df = df.copy()
     if label_col and label_col in plot_df.columns:
@@ -186,6 +193,7 @@ def render_address_map(
     plot_df["label_offset"] = [[12, -24 - lvl * 18] for lvl in _levels]
     icon_layer = pdk.Layer(
         "IconLayer",
+        id="markers",
         data=plot_df,
         get_icon="icon_data",
         get_position=f"[{lon_col}, {lat_col}]",
@@ -200,6 +208,7 @@ def render_address_map(
     _address_chars = "".join(sorted(set("".join(plot_df["주소"].astype(str))))) + string.printable
     text_layer = pdk.Layer(
         "TextLayer",
+        id="labels",
         data=plot_df,
         get_position=f"[{lon_col}, {lat_col}]",
         get_text="주소",
@@ -235,7 +244,16 @@ def render_address_map(
             layers=layers, initial_view_state=view_state, tooltip=tooltip,
             map_style=None,  # Streamlit 테마 기본 지도 스타일 사용 (Carto/Mapbox 키 불필요)
         )
-    st.pydeck_chart(deck)
+
+    if not enable_selection:
+        st.pydeck_chart(deck)
+        return None
+
+    event = st.pydeck_chart(
+        deck, on_select="rerun", selection_mode="single-object", key=selection_key,
+    )
+    selected_objects = event.selection.get("objects", {}).get("markers", []) if event else []
+    return selected_objects[0] if selected_objects else None
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1043,13 +1061,36 @@ with tab_map:
                     help="지점이 많아 라벨이 복잡해 보이면 '마커만 표시'로 바꿔보세요.",
                 )
                 show_labels = bool(addr_col) and display_mode == "마커 + 주소 표시"
-                render_address_map(
+                selected = render_address_map(
                     plot_df, label_col="주소" if addr_col else None,
                     show_labels=show_labels, vworld_key=vworld_key,
+                    enable_selection=True, selection_key="map_upload_selection",
                 )
 
                 st.subheader("업로드한 데이터")
-                st.dataframe(add_pyeong_columns(map_df), width='stretch')
+                display_df = add_pyeong_columns(map_df)
+
+                match_mask = None
+                if selected:
+                    sel_lat = round(float(selected.get("lat")), 7)
+                    sel_lon = round(float(selected.get("lon")), 7)
+                    lat_num = pd.to_numeric(map_df[lat_col], errors="coerce").round(7)
+                    lon_num = pd.to_numeric(map_df[lon_col], errors="coerce").round(7)
+                    match_mask = (lat_num == sel_lat) & (lon_num == sel_lon)
+
+                if match_mask is not None and match_mask.any():
+                    st.caption(
+                        f"🔎 지도에서 **{selected.get('주소', '선택한 지점')}** 을(를) 클릭했습니다 — "
+                        "아래 표에서 강조 표시된 행입니다. (Streamlit 표는 특정 행으로 자동 스크롤은 "
+                        "지원하지 않아, 색상 강조로 대신합니다.)"
+                    )
+
+                    def _highlight_selected(row):
+                        return ["background-color: #FFE08A"] * len(row) if match_mask.loc[row.name] else [""] * len(row)
+
+                    st.dataframe(display_df.style.apply(_highlight_selected, axis=1), width='stretch')
+                else:
+                    st.dataframe(display_df, width='stretch')
     else:
         st.info("파일을 업로드해주세요.")
 
