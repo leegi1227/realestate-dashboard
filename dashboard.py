@@ -136,6 +136,8 @@ def render_address_map(
     vworld_key: str = None,
     enable_selection: bool = False,
     selection_key: str = None,
+    highlight_lat: float = None,
+    highlight_lon: float = None,
 ):
     """지점을 구글 지도 스타일 핀으로 표시하고, show_labels=True면 핀 옆에 주소도 표시하는
 
@@ -153,6 +155,11 @@ def render_address_map(
     담긴 dict)를 반환한다(클릭이 없으면 None). st.pydeck_chart의 on_select 기능은
     선택 상태를 유지하려면 레이어에 고유 id가 있어야 해서, 이 함수는 항상 레이어에
     id를 붙인다 — enable_selection=False일 때도 id 자체는 무해하다.
+
+    highlight_lat/highlight_lon을 넘기면(예: 표에서 행을 선택했을 때) 그 좌표에 노란
+    테두리 원(halo)을 마커 밑에 깔아서 "이 마커가 지금 선택된 지점"임을 시각적으로
+    표시한다. 표 → 지도 방향 강조(이 옵션)와 지도 → 표 방향 강조(enable_selection)는
+    서로 독립적으로 켤 수 있다.
     """
     plot_df = df.copy()
     if label_col and label_col in plot_df.columns:
@@ -224,6 +231,22 @@ def render_address_map(
     )
     tooltip = {"html": "<b>{주소}</b>", "style": {"backgroundColor": "white", "color": "black"}}
     layers = [icon_layer, text_layer] if show_labels else [icon_layer]
+    if highlight_lat is not None and highlight_lon is not None:
+        halo_df = pd.DataFrame({lat_col: [highlight_lat], lon_col: [highlight_lon]})
+        halo_layer = pdk.Layer(
+            "ScatterplotLayer",
+            id="halo",
+            data=halo_df,
+            get_position=f"[{lon_col}, {lat_col}]",
+            get_fill_color=[255, 214, 0, 110],
+            get_line_color=[255, 170, 0, 255],
+            get_radius=28,
+            radius_units='"pixels"',
+            stroked=True,
+            line_width_min_pixels=3,
+            pickable=False,
+        )
+        layers = [halo_layer] + layers
     if vworld_key:
         # pydeck은 map_style을 dict로 주면 map_provider가 'mapbox'여야 한다고 자체 검증한다
         # (Mapbox 전용 기능이라 가정하기 때문). 실제로는 Mapbox 토큰 없이 우리 스타일
@@ -1061,13 +1084,35 @@ with tab_map:
                     help="지점이 많아 라벨이 복잡해 보이면 '마커만 표시'로 바꿔보세요.",
                 )
                 show_labels = bool(addr_col) and display_mode == "마커 + 주소 표시"
+
+                # 표에서 행을 선택한 적이 있으면(이전 rerun에서 위젯이 이미 등록돼
+                # session_state에 값이 있으면), 그 지점을 지도에 노란 원으로 표시한다.
+                # 위젯 키의 값은 이 rerun이 시작되기 전에 이미 갱신돼 있으므로, 아래
+                # st.dataframe 호출보다 먼저 읽어도 방금 클릭한 행을 정확히 반영한다.
+                highlight_lat = highlight_lon = highlight_addr = None
+                _prev_table_sel = st.session_state.get("map_upload_table_select")
+                if _prev_table_sel:
+                    _rows = _prev_table_sel.get("selection", {}).get("rows", [])
+                    if _rows and 0 <= _rows[0] < len(map_df):
+                        _hrow = map_df.iloc[_rows[0]]
+                        try:
+                            highlight_lat = float(_hrow[lat_col])
+                            highlight_lon = float(_hrow[lon_col])
+                        except (TypeError, ValueError):
+                            highlight_lat = highlight_lon = None
+                        highlight_addr = str(_hrow[addr_col]) if addr_col else f"{_rows[0]}번 행"
+
                 selected = render_address_map(
                     plot_df, label_col="주소" if addr_col else None,
                     show_labels=show_labels, vworld_key=vworld_key,
                     enable_selection=True, selection_key="map_upload_selection",
+                    highlight_lat=highlight_lat, highlight_lon=highlight_lon,
                 )
+                if highlight_lat is not None:
+                    st.caption(f"📍 표에서 선택한 **{highlight_addr}**의 위치를 지도에 노란 원으로 표시했습니다.")
 
                 st.subheader("업로드한 데이터")
+                st.caption("행 번호(맨 왼쪽)를 클릭하면 그 지점의 마커 위치가 지도에 표시됩니다.")
                 display_df = add_pyeong_columns(map_df)
 
                 match_mask = None
@@ -1078,6 +1123,10 @@ with tab_map:
                     lon_num = pd.to_numeric(map_df[lon_col], errors="coerce").round(7)
                     match_mask = (lat_num == sel_lat) & (lon_num == sel_lon)
 
+                table_kwargs = dict(
+                    on_select="rerun", selection_mode="single-row",
+                    key="map_upload_table_select", width='stretch',
+                )
                 if match_mask is not None and match_mask.any():
                     st.caption(
                         f"🔎 지도에서 **{selected.get('주소', '선택한 지점')}** 을(를) 클릭했습니다 — "
@@ -1088,9 +1137,9 @@ with tab_map:
                     def _highlight_selected(row):
                         return ["background-color: #FFE08A"] * len(row) if match_mask.loc[row.name] else [""] * len(row)
 
-                    st.dataframe(display_df.style.apply(_highlight_selected, axis=1), width='stretch')
+                    st.dataframe(display_df.style.apply(_highlight_selected, axis=1), **table_kwargs)
                 else:
-                    st.dataframe(display_df, width='stretch')
+                    st.dataframe(display_df, **table_kwargs)
     else:
         st.info("파일을 업로드해주세요.")
 
