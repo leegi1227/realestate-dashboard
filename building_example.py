@@ -875,29 +875,71 @@ def geocode_address_vworld(vworld_key: str, address: str, address_type: str = "R
     return None, error.get("text") or error.get("code") or f"알 수 없는 오류 (status={status})"
 
 
+def geocode_address_kakao(kakao_key: str, address: str):
+    """카카오 로컬 API(주소 검색)로 주소를 좌표(경도, 위도)로 변환한다.
+
+    도로명·지번 주소를 한 번의 요청으로 자동 판별해 처리하므로, 브이월드처럼
+    ROAD/PARCEL 타입을 나눠 두 번 호출할 필요가 없다.
+
+    브이월드 지오코딩은 해외 클라우드(AWS/GCP 등) IP 접속을 정책적으로 차단해
+    (공간정보관리법 제16조 국외반출 제한 근거) Streamlit Cloud 배포본에서는
+    재시도를 해도 항상 실패했다 — 로컬에서만 되고 배포본에서는 100% 실패하는
+    패턴이 그 증거. 카카오 API는 이런 제한이 없어 배포 환경에서도 동작한다.
+
+    반환값은 (좌표 또는 None, 실패 사유 또는 None) 튜플 — geocode_address_vworld와
+    같은 계약을 유지해 호출부(add_coordinates_column 등)를 그대로 재사용할 수 있게 한다.
+    """
+    url = "https://dapi.kakao.com/v2/local/search/address.json"
+    headers = {"Authorization": f"KakaoAK {kakao_key}"}
+    params = {"query": address}
+    last_error = None
+    data = None
+    status_code = None
+    for attempt in range(3):
+        try:
+            res = requests.get(url, headers=headers, params=params, timeout=10)
+            status_code = res.status_code
+            data = res.json()
+            last_error = None
+            break
+        except Exception as e:
+            last_error = e
+            if attempt < 2:
+                time.sleep(0.6 * (attempt + 1))
+    if last_error is not None:
+        return None, f"요청 실패(재시도 3회 실패): {last_error}"
+
+    if status_code != 200:
+        msg = (data or {}).get("message") or (data or {}).get("errorType") or f"HTTP {status_code}"
+        return None, f"카카오 API 오류: {msg}"
+
+    documents = data.get("documents") or []
+    if not documents:
+        return None, "일치하는 주소를 찾지 못함"
+
+    doc = documents[0]
+    try:
+        return (float(doc["x"]), float(doc["y"])), None
+    except (KeyError, TypeError, ValueError):
+        return None, "응답 형식을 해석하지 못함"
+
+
 def add_coordinates_column(
     df: pd.DataFrame,
-    vworld_key: str,
+    kakao_key: str,
     address_col: str = "주소",
     reverse_match_col: str = "역매칭주소",
     progress_callback=None,
     wait_time: float = 0.1,
-    assume_parcel: bool = True,
 ) -> pd.DataFrame:
-    """주소(지번) 또는 역매칭된 주소를 브이월드로 지오코딩해서 위도/경도 컬럼을 추가한다.
+    """주소(지번) 또는 역매칭된 주소를 카카오로 지오코딩해서 위도/경도 컬럼을 추가한다.
 
     지번이 마스킹된 상업용 거래는 '주소' 컬럼에 구체적인 번지가 없어(예:
     "서울특별시 송파구 가락동") 그대로는 지오코딩되지 않는다. 역매칭
     (reverse_match_transactions)으로 실제 주소가 확인된 행은 그 주소를 우선
-    쓴다 — 다만 역매칭주소는 도로명(도로명대지위치)일 수도, 지번(대지위치)일
-    수도 있고 후보가 여러 개(다수 인접후보, ';'로 구분)일 수도 있어서, 세미콜론이
-    있으면(모호한 다수 후보) 건너뛰고, 그 외엔 도로명으로 먼저 시도한 뒤 실패하면
-    지번으로 재시도한다. 같은 주소는 한 번만 지오코딩해서 API 호출을 최소화한다.
-
-    assume_parcel=True(기본값)면 address_col은 항상 지번 형식이라고 보고 지번으로만
-    조회한다(실거래가 탭처럼 형식을 확신할 수 있을 때 API 호출을 아낀다). 사용자가
-    직접 입력/업로드한 주소처럼 도로명인지 지번인지 모를 땐 assume_parcel=False로
-    두면 도로명으로 먼저 시도한 뒤 실패 시 지번으로 재시도한다.
+    쓴다 — 다만 역매칭주소는 후보가 여러 개(다수 인접후보, ';'로 구분)일 수도
+    있어서, 세미콜론이 있으면(모호한 다수 후보) 건너뛴다. 같은 주소는 한 번만
+    지오코딩해서 API 호출을 최소화한다.
     """
     if df is None or df.empty or address_col not in df.columns:
         return df
@@ -906,35 +948,25 @@ def add_coordinates_column(
     has_reverse = reverse_match_col in out.columns
 
     def _target(row):
-        # (지오코딩에 쓸 주소, 주소 형식을 확신할 수 있는지) — 역매칭주소는
-        # 도로명/지번이 섞여 있어 형식을 모르니 둘 다 시도해야 하지만, '주소'
-        # 컬럼은 (assume_parcel=True인 한) 항상 지번 형식이라 확신할 수 있어
-        # 불필요한 API 호출을 줄인다.
         if has_reverse:
             rm = row[reverse_match_col]
             if isinstance(rm, str) and rm.strip() and ";" not in rm:
-                return rm.strip(), False
+                return rm.strip()
         addr = str(row[address_col])
-        addr = addr[:-2] if addr.endswith("번지") else addr  # "237번지" -> "237"
-        return addr, assume_parcel
+        return addr[:-2] if addr.endswith("번지") else addr  # "237번지" -> "237"
 
     targets = [_target(row) for _, row in out.iterrows()]
-    unique_targets = sorted({t for t in targets if t[0] and t[0].lower() != "nan"})
+    unique_targets = sorted({a for a in targets if a and a.lower() != "nan"})
 
     coord_map = {}
     error_map = {}
     total = len(unique_targets)
-    for i, (addr, is_parcel) in enumerate(unique_targets, start=1):
-        if is_parcel:
-            coord, reason = geocode_address_vworld(vworld_key, addr, address_type="PARCEL")
-        else:
-            coord, reason = geocode_address_vworld(vworld_key, addr, address_type="ROAD")
-            if not coord:
-                coord, reason = geocode_address_vworld(vworld_key, addr, address_type="PARCEL")
+    for i, addr in enumerate(unique_targets, start=1):
+        coord, reason = geocode_address_kakao(kakao_key, addr)
         if coord:
-            coord_map[(addr, is_parcel)] = coord
+            coord_map[addr] = coord
         else:
-            error_map[(addr, is_parcel)] = reason
+            error_map[addr] = reason
         if progress_callback:
             progress_callback(i, total)
         if wait_time:
@@ -1099,11 +1131,17 @@ def build_master_report(
     sido: str = "",
     sigungu_name: str = "",
     vworld_key: str = None,
+    kakao_key: str = None,
 ) -> dict:
     """지번 하나에 대해 단일조회·실거래가·노후도·내진·공시가격(+선택적 동단위 비교)을 한 번에 모은 종합 리포트
 
     vworld_key를 넘기면 브이월드 데이터 API로 용도지역/지구/구역 상세(도시지역,
-    경관지구, 고도지구, 개발제한구역 등 15종 레이어)를 추가로 조회한다.
+    경관지구, 고도지구, 개발제한구역 등 15종 레이어)를 추가로 조회한다. 좌표 확보(지오코딩)
+    자체는 kakao_key로 카카오 API를 쓴다 — 브이월드 지오코딩(req/address)은 해외
+    클라우드 배포본에서 막혀있다(공간정보관리법 제16조 국외반출 제한 근거 공지).
+    이 용도지역 조회(req/data)도 같은 "브이월드 Open API" 공지 범주라 배포본에서
+    똑같이 막혀 있을 가능성이 높다 — 아직 배포 환경에서 별도로 확인되진 않았으니,
+    이 기능도 안 되면 카카오 등 대체 데이터 소스가 필요하다.
     """
     result = {}
 
@@ -1141,19 +1179,16 @@ def build_master_report(
 
     result["브이월드용도지역"] = {}
     result["좌표"] = None
-    if vworld_key and title_df is not None and not title_df.empty:
+    if kakao_key and title_df is not None and not title_df.empty:
         road_addr = title_df.iloc[0].get("도로명대지위치")
         parcel_addr = title_df.iloc[0].get("대지위치")
-        # 도로명 주소를 먼저 도로명(ROAD) 타입으로 시도하고, 없거나 실패하면
-        # 지번 주소를 지번(PARCEL) 타입으로 시도한다. 이전에는 도로명이 없을 때
-        # 지번 주소로 대체하면서도 여전히 ROAD 타입으로 호출해, 지번 형식
-        # 주소를 도로명 파서에 넣는 꼴이 되어 대부분 좌표를 찾지 못했다.
-        coord, _reason = geocode_address_vworld(vworld_key, road_addr, address_type="ROAD") if road_addr else (None, None)
+        coord, _reason = geocode_address_kakao(kakao_key, road_addr) if road_addr else (None, None)
         if not coord and parcel_addr:
-            coord, _reason = geocode_address_vworld(vworld_key, parcel_addr, address_type="PARCEL")
+            coord, _reason = geocode_address_kakao(kakao_key, parcel_addr)
         if coord:
             result["좌표"] = coord
-            result["브이월드용도지역"] = get_vworld_zoning_detail(vworld_key, coord[0], coord[1])
+            if vworld_key:
+                result["브이월드용도지역"] = get_vworld_zoning_detail(vworld_key, coord[0], coord[1])
 
     if district_title_df is not None and not district_title_df.empty:
         result["동단위통계"] = analyze_district_stats(district_title_df)

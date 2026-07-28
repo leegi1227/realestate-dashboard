@@ -35,7 +35,7 @@ from building_example import (
     combine_zoning_sources,
     generate_master_pdf_report,
     generate_pdf_report,
-    geocode_address_vworld,
+    geocode_address_kakao,
     get_bdong_code_map,
     get_building_ledger,
     get_dong_list,
@@ -294,9 +294,21 @@ with st.sidebar:
         value="",
         type="password",
         placeholder="용도지역/지구 상세 정보를 원하면 입력 (없어도 나머지 기능은 정상 동작)",
-        help="https://www.vworld.kr 에서 발급. 통합 리포트의 용도지역/지구 상세 조회에만 쓰입니다.",
+        help="https://www.vworld.kr 에서 발급. 통합 리포트의 용도지역/지구 상세 조회에만 쓰입니다. "
+             "(주소 좌표 조회는 더 이상 이 키를 쓰지 않습니다 — 아래 카카오 키 참고)",
     )
     vworld_key = vworld_key.strip() if vworld_key else None
+
+    kakao_key = st.text_input(
+        "카카오맵 REST API 키 (선택)",
+        value="",
+        type="password",
+        placeholder="주소 좌표(위도/경도) 조회·지도 표시에 사용",
+        help="https://developers.kakao.com 에서 앱 생성 후 'REST API 키'를 복사 (JavaScript 키 아님). "
+             "브이월드 지오코딩은 해외 클라우드 배포 환경에서 정책적으로 차단돼(공간정보관리법 제16조) "
+             "이 앱의 좌표 조회 기능은 전부 카카오로 전환했습니다.",
+    )
+    kakao_key = kakao_key.strip() if kakao_key else None
 
     address = st.text_input("주소 (시/군/구 + 동)", value="성남시 분당구 백현동",
                              help="코드를 몰라도 동 이름으로 자동 검색됩니다.")
@@ -356,7 +368,7 @@ with tab_master:
                         months_lookback=months_lookback,
                         district_title_df=district_title_df,
                         sido=addr_sido, sigungu_name=addr_sigungu_name,
-                        vworld_key=vworld_key,
+                        vworld_key=vworld_key, kakao_key=kakao_key,
                     )
                 st.session_state.master = master
                 st.session_state.master_address_label = address
@@ -399,10 +411,10 @@ with tab_master:
                     pd.DataFrame({"lat": [coord[1]], "lon": [coord[0]], "주소": [addr]}),
                     label_col="주소", vworld_key=vworld_key,
                 )
-            elif vworld_key:
+            elif kakao_key:
                 st.caption("좌표를 확인하지 못해 지도를 표시할 수 없습니다.")
             else:
-                st.caption("브이월드 인증키를 입력하면 이 위치를 지도에 표시합니다.")
+                st.caption("카카오맵 REST API 키를 입력하면 이 위치를 지도에 표시합니다.")
         else:
             st.warning("표제부 조회 결과가 없습니다 — 주소/번지를 확인해주세요.")
 
@@ -729,12 +741,12 @@ with tab_price:
         st.caption("⚠️ 역매칭을 쓰려면 위에서 '동'을 특정 동으로 선택해주세요.")
 
     tp_with_coords = st.checkbox(
-        "주소 좌표(위도/경도) 함께 조회 — 지도 표시용 (브이월드 인증키 필요, 고유 주소당 1회 호출)",
-        value=False, key="tp_with_coords", disabled=not vworld_key,
-        help="사이드바에 브이월드 인증키를 입력해야 사용할 수 있습니다.",
+        "주소 좌표(위도/경도) 함께 조회 — 지도 표시용 (카카오 REST API 키 필요, 고유 주소당 1회 호출)",
+        value=False, key="tp_with_coords", disabled=not kakao_key,
+        help="사이드바에 카카오맵 REST API 키를 입력해야 사용할 수 있습니다.",
     )
-    if not vworld_key and tp_with_coords:
-        st.caption("⚠️ 좌표 조회를 쓰려면 사이드바에 브이월드 인증키를 입력해주세요.")
+    if not kakao_key and tp_with_coords:
+        st.caption("⚠️ 좌표 조회를 쓰려면 사이드바에 카카오맵 REST API 키를 입력해주세요.")
 
     tp_period_mode = st.checkbox("기간으로 조회 (여러 달)", value=False, key="tp_period_mode")
     tp_start = tp_end = tp_year_month = None
@@ -794,14 +806,14 @@ with tab_price:
                     else:
                         st.caption("마스킹된 지번이 없어 역매칭을 건너뜁니다.")
 
-                if tp_with_coords and vworld_key and not tp_df.empty and "주소" in tp_df.columns:
+                if tp_with_coords and kakao_key and not tp_df.empty and "주소" in tp_df.columns:
                     coord_progress = st.progress(0.0, text="좌표 조회 준비 중...")
 
                     def _on_coord_progress(i, total):
                         coord_progress.progress(i / total, text=f"주소 좌표 조회 중... ({i}/{total} 고유 주소)")
 
                     tp_df = add_coordinates_column(
-                        tp_df, vworld_key, progress_callback=_on_coord_progress,
+                        tp_df, kakao_key, progress_callback=_on_coord_progress,
                     )
                     coord_progress.empty()
 
@@ -1046,8 +1058,8 @@ with tab_map:
 # ------------------------------------------------------------------
 with tab_geocode:
     st.write("**주소**를 입력하면 경도·위도 좌표만 조회합니다. 도로명·지번 주소 모두 지원합니다.")
-    if not vworld_key:
-        st.warning("사이드바에 브이월드(V-World) 인증키를 입력해야 사용할 수 있습니다.")
+    if not kakao_key:
+        st.warning("사이드바에 카카오맵 REST API 키를 입력해야 사용할 수 있습니다.")
     else:
         st.subheader("🔍 단일 주소 검색")
         single_addr = st.text_input(
@@ -1060,9 +1072,7 @@ with tab_geocode:
                 st.warning("주소를 입력해주세요.")
             else:
                 with st.spinner("조회 중..."):
-                    coord, reason = geocode_address_vworld(vworld_key, addr, address_type="ROAD")
-                    if not coord:
-                        coord, reason = geocode_address_vworld(vworld_key, addr, address_type="PARCEL")
+                    coord, reason = geocode_address_kakao(kakao_key, addr)
                 st.session_state.geo_single_result = (addr, coord, reason)
 
         single_result = st.session_state.get("geo_single_result")
@@ -1110,7 +1120,7 @@ with tab_geocode:
                             geo_progress.progress(i / total, text=f"좌표 조회 중... ({i}/{total} 고유 주소)")
 
                         st.session_state.geo_batch_result = add_coordinates_column(
-                            work_df, vworld_key, progress_callback=_on_geo_progress, assume_parcel=False,
+                            work_df, kakao_key, progress_callback=_on_geo_progress,
                         )
                         geo_progress.empty()
 
