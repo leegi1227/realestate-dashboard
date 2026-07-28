@@ -827,8 +827,13 @@ _VWORLD_ZONING_LAYERS = [
 def geocode_address_vworld(vworld_key: str, address: str, address_type: str = "ROAD"):
     """도로명(ROAD) 또는 지번(PARCEL) 주소를 브이월드 주소검색 API로 좌표(경도, 위도)로
 
-    변환. 실패 시 None. 지번 주소를 넣을 땐 address_type="PARCEL"로 호출해야 한다
-    (도로명 파서로 지번 주소를 넣으면 대부분 인식하지 못한다).
+    변환. 지번 주소를 넣을 땐 address_type="PARCEL"로 호출해야 한다(도로명 파서로
+    지번 주소를 넣으면 대부분 인식하지 못한다).
+
+    반환값은 (좌표 또는 None, 실패 사유 또는 None) 튜플. 실패 사유를 함께 반환해야
+    "인증키가 잘못됨"과 "주소를 못 찾음"을 구분할 수 있다 — 이전에는 모든 실패를
+    조용히 None으로 뭉개서, 키가 무효화됐거나 일일 호출 한도를 넘긴 경우에도
+    "주소가 이상해서 그런가?" 하고 엉뚱한 곳을 의심하게 만들었다.
     """
     url = "https://api.vworld.kr/req/address"
     params = {
@@ -838,10 +843,21 @@ def geocode_address_vworld(vworld_key: str, address: str, address_type: str = "R
     try:
         res = requests.get(url, params=params, verify=False, timeout=10)
         data = res.json()
-        point = data["response"]["result"]["point"]
-        return float(point["x"]), float(point["y"])
-    except Exception:
-        return None
+    except Exception as e:
+        return None, f"요청 실패: {e}"
+
+    response = data.get("response", {})
+    status = response.get("status")
+    if status == "OK":
+        try:
+            point = response["result"]["point"]
+            return (float(point["x"]), float(point["y"])), None
+        except (KeyError, TypeError, ValueError):
+            return None, "응답 형식을 해석하지 못함"
+    if status == "NOT_FOUND":
+        return None, "일치하는 주소를 찾지 못함"
+    error = response.get("error", {})
+    return None, error.get("text") or error.get("code") or f"알 수 없는 오류 (status={status})"
 
 
 def add_coordinates_column(
@@ -891,16 +907,19 @@ def add_coordinates_column(
     unique_targets = sorted({t for t in targets if t[0] and t[0].lower() != "nan"})
 
     coord_map = {}
+    error_map = {}
     total = len(unique_targets)
     for i, (addr, is_parcel) in enumerate(unique_targets, start=1):
         if is_parcel:
-            coord = geocode_address_vworld(vworld_key, addr, address_type="PARCEL")
+            coord, reason = geocode_address_vworld(vworld_key, addr, address_type="PARCEL")
         else:
-            coord = geocode_address_vworld(vworld_key, addr, address_type="ROAD")
+            coord, reason = geocode_address_vworld(vworld_key, addr, address_type="ROAD")
             if not coord:
-                coord = geocode_address_vworld(vworld_key, addr, address_type="PARCEL")
+                coord, reason = geocode_address_vworld(vworld_key, addr, address_type="PARCEL")
         if coord:
             coord_map[(addr, is_parcel)] = coord
+        else:
+            error_map[(addr, is_parcel)] = reason
         if progress_callback:
             progress_callback(i, total)
         if wait_time:
@@ -910,6 +929,7 @@ def add_coordinates_column(
 
     out["경도"] = addr_series.map(lambda a: coord_map.get(a, (None, None))[0])
     out["위도"] = addr_series.map(lambda a: coord_map.get(a, (None, None))[1])
+    out["좌표조회실패사유"] = addr_series.map(lambda a: error_map.get(a))
     return out
 
 
@@ -1107,12 +1127,18 @@ def build_master_report(
     result["브이월드용도지역"] = {}
     result["좌표"] = None
     if vworld_key and title_df is not None and not title_df.empty:
-        addr_for_geocode = title_df.iloc[0].get("도로명대지위치") or title_df.iloc[0].get("대지위치")
-        if addr_for_geocode:
-            coord = geocode_address_vworld(vworld_key, addr_for_geocode)
-            if coord:
-                result["좌표"] = coord
-                result["브이월드용도지역"] = get_vworld_zoning_detail(vworld_key, coord[0], coord[1])
+        road_addr = title_df.iloc[0].get("도로명대지위치")
+        parcel_addr = title_df.iloc[0].get("대지위치")
+        # 도로명 주소를 먼저 도로명(ROAD) 타입으로 시도하고, 없거나 실패하면
+        # 지번 주소를 지번(PARCEL) 타입으로 시도한다. 이전에는 도로명이 없을 때
+        # 지번 주소로 대체하면서도 여전히 ROAD 타입으로 호출해, 지번 형식
+        # 주소를 도로명 파서에 넣는 꼴이 되어 대부분 좌표를 찾지 못했다.
+        coord, _reason = geocode_address_vworld(vworld_key, road_addr, address_type="ROAD") if road_addr else (None, None)
+        if not coord and parcel_addr:
+            coord, _reason = geocode_address_vworld(vworld_key, parcel_addr, address_type="PARCEL")
+        if coord:
+            result["좌표"] = coord
+            result["브이월드용도지역"] = get_vworld_zoning_detail(vworld_key, coord[0], coord[1])
 
     if district_title_df is not None and not district_title_df.empty:
         result["동단위통계"] = analyze_district_stats(district_title_df)

@@ -1060,14 +1060,14 @@ with tab_geocode:
                 st.warning("주소를 입력해주세요.")
             else:
                 with st.spinner("조회 중..."):
-                    coord = geocode_address_vworld(vworld_key, addr, address_type="ROAD")
+                    coord, reason = geocode_address_vworld(vworld_key, addr, address_type="ROAD")
                     if not coord:
-                        coord = geocode_address_vworld(vworld_key, addr, address_type="PARCEL")
-                st.session_state.geo_single_result = (addr, coord)
+                        coord, reason = geocode_address_vworld(vworld_key, addr, address_type="PARCEL")
+                st.session_state.geo_single_result = (addr, coord, reason)
 
         single_result = st.session_state.get("geo_single_result")
         if single_result:
-            found_addr, coord = single_result
+            found_addr, coord, reason = single_result
             if coord:
                 lon, lat = coord
                 c1, c2 = st.columns(2)
@@ -1078,7 +1078,7 @@ with tab_geocode:
                     label_col="주소", vworld_key=vworld_key,
                 )
             else:
-                st.error("좌표를 찾지 못했습니다. 주소를 다시 확인해주세요.")
+                st.error(f"좌표를 찾지 못했습니다 ({reason}). 주소를 다시 확인해주세요.")
 
         st.divider()
         st.subheader("📄 파일 일괄 변환")
@@ -1118,6 +1118,10 @@ with tab_geocode:
         if batch_result is not None:
             found = int(batch_result["위도"].notna().sum())
             st.success(f"{found}/{len(batch_result)}건 좌표를 찾았습니다.")
+            if found == 0 and "좌표조회실패사유" in batch_result.columns:
+                top_reason = batch_result["좌표조회실패사유"].dropna().mode()
+                if not top_reason.empty:
+                    st.error(f"공통 실패 사유: {top_reason.iloc[0]}")
             st.dataframe(batch_result, width='stretch')
             csv_bytes = batch_result.to_csv(index=False).encode("utf-8-sig")
             st.download_button(
@@ -1126,4 +1130,4 @@ with tab_geocode:
             )
             map_df = batch_result.dropna(subset=["위도", "경도"])
             if not map_df.empty:
-                render_address_map(map_df, label_col="주소", vworld_key=vworld_key)
+                render_address_map(map_df, lat_col="위도", lon_col="경도", label_col="주소", vworld_key=vworld_key)
