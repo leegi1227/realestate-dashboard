@@ -196,9 +196,15 @@ function renderMap(L, mapEl, data, setTriggerValue) {
     data.singleZoom || 17,
   );
   function addOsmLayer(attributionSuffix) {
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    // 표준 OSM 타일(tile.openstreetmap.org)은 상점·업종 아이콘/라벨(예: "F&B" 같은
+    // 프랜차이즈·업종 텍스트)이 촘촘히 박혀 있어, 이미 지하철 노선·역·출구까지 얹은
+    // 지도에서는 너무 산만해 보인다는 피드백을 받았다. 라벨을 최소화한 CartoDB
+    // Positron("light_all") 스타일로 교체 — 데이터 출처는 동일하게 OSM이고 키도
+    // 필요 없다(연남동 상권분석 PPTX 지도 작업에서도 같은 스타일을 썼다).
+    L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png", {
       maxZoom: 19,
-      attribution: "&copy; OpenStreetMap contributors" + (attributionSuffix || ""),
+      subdomains: "abcd",
+      attribution: "&copy; OpenStreetMap contributors &copy; CARTO" + (attributionSuffix || ""),
     }).addTo(map);
   }
 
