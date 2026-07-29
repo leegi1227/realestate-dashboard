@@ -15,6 +15,19 @@ const LEAFLET_JS_URL = "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.
 // 방식). 카카오맵/네이버처럼 역마다 노선색 원형 배지로 표시하는 데 쓴다.
 const SUBWAY_STATIONS = "__SUBWAY_STATIONS_JSON__";
 
+// 노선 실제 선형: [노선번호/약칭, 노선색, [[[위도,경도],...] 구간, ...]]. route relation의
+// way(선로) 멤버 geometry를 그대로 이어붙인 것 — 여러 구간(segments)으로 나뉘어 있는 건
+// way가 원래 조각조각이기 때문이며 Leaflet은 끊어진 구간을 그대로 여러 선으로 그려도
+// 자연스럽게 이어져 보인다. 좌표점이 과도하게 많아(원본 3만 개) Douglas-Peucker로
+// 압축했다(허용 오차 약 11m — 지도에서 보이는 굵은 선 두께보다 작아 시각적으로 거의
+// 차이가 없다).
+const SUBWAY_LINES = "__SUBWAY_LINES_JSON__";
+
+// 출구: [[위도, 경도, 출구번호], ...]. railway=subway_entrance 노드의 ref 태그 —
+// 카카오맵처럼 역명과 무관하게 항상 같은 중립색 원으로 표시한다(출구 자체는 특정
+// 노선 색이 없으므로).
+const SUBWAY_EXITS = "__SUBWAY_EXITS_JSON__";
+
 // Leaflet의 JS 라이브러리(window.L)는 페이지에 하나만 있으면 되는 전역이라
 // 모듈 스코프에 캐시해서 앱 전체(탭이 여러 개라 컴포넌트 인스턴스도 여러 개)가
 // 공유한다 — CSS와 달리 섀도 DOM 경계와 무관하게 그냥 전역 객체라 공유해도 된다.
@@ -122,6 +135,45 @@ function addSubwayStations(L, map) {
   });
 }
 
+function getSubwayLines() {
+  return Array.isArray(SUBWAY_LINES) ? SUBWAY_LINES : [];
+}
+
+function getSubwayExits() {
+  return Array.isArray(SUBWAY_EXITS) ? SUBWAY_EXITS : [];
+}
+
+function addSubwayLines(L, map) {
+  // 역 배지(addSubwayStations)보다 먼저 그려서 배지가 선 위에 얹히게 한다.
+  getSubwayLines().forEach(([ref, colour, segments]) => {
+    segments.forEach((seg) => {
+      L.polyline(seg, {
+        color: colour,
+        weight: 5,
+        opacity: 0.85,
+        lineCap: "round",
+        lineJoin: "round",
+      }).addTo(map);
+    });
+  });
+}
+
+function addSubwayExits(L, map) {
+  const EXIT_COLOR = "#FFC400";
+  getSubwayExits().forEach(([lat, lon, ref]) => {
+    const icon = L.divIcon({
+      className: "kmc-subway-icon",
+      html:
+        '<span style="display:flex;align-items:center;justify-content:center;' +
+        "width:16px;height:16px;border-radius:50%;background:" + EXIT_COLOR + ";color:#222;" +
+        "font:bold 9px/1 -apple-system,'Malgun Gothic',sans-serif;border:1.5px solid #fff;" +
+        'box-shadow:0 0 2px rgba(0,0,0,.6);">' + ref + "</span>",
+      iconSize: null,
+    });
+    L.marker([lat, lon], { icon, keyboard: false }).addTo(map);
+  });
+}
+
 // data와 setTriggerValue를 그대로 인자로 받아 클로저에 가둔다 — 컴포넌트
 // 인스턴스가 여러 개(대시보드 탭마다 하나씩)라도 서로의 콜백을 침범하지 않는다.
 function renderMap(L, mapEl, data, setTriggerValue) {
@@ -183,24 +235,14 @@ function renderMap(L, mapEl, data, setTriggerValue) {
     addOsmLayer();
   }
 
-  // 지하철역·노선 오버레이 — OpenRailwayMap(무료, 키 불필요, OSM 데이터 기반).
-  // 배경지도(브이월드든 OSM이든) 위에 얹어서 노선 색상·역명·(대장홍대선처럼
-  // 아직 미개통인 노선은 점선으로 구분) 그대로 보여준다. 데이터가 없는 곳은
-  // 타일이 투명이라 배경지도를 가리지 않는다.
-  L.tileLayer("https://{s}.tiles.openrailwaymap.org/standard/{z}/{x}/{y}.png", {
-    maxZoom: 19,
-    minZoom: 2,
-    subdomains: "abc",
-    attribution:
-      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, ' +
-      'Style: <a href="http://www.openrailwaymap.org/">OpenRailwayMap</a>',
-  }).addTo(map);
-
-  // 역마다 카카오맵/네이버맵 스타일의 노선색 원형 배지(SUBWAY_STATIONS, 위에서 정의)를
-  // 얹는다 — OpenRailwayMap 타일은 얇은 선이라 "역이 잘 안 보인다"는 피드백을 받아
-  // 추가한 것. 타일과 달리 벡터라 항상 뚜렷하게 보이고, 여러 노선이 겹치는 역은
-  // 배지가 옆으로 나란히 붙는다. 정차역 개수가 많아(500곳 이상) 매번 새로 만들어도
-  // 성능에 문제없다 — 지도 자체를 이미 통째로 새로 만드는 rerun에서만 같이 실행된다.
+  // 지하철 노선·출구·역 — 카카오맵/네이버맵처럼 굵은 노선색 선 + 출구 번호 원 +
+  // 역마다 노선색 배지로 표시한다(SUBWAY_LINES/SUBWAY_EXITS/SUBWAY_STATIONS, 파일
+  // 위쪽에서 정의). 이전엔 OpenRailwayMap 타일 오버레이를 썼는데, 실제 벡터 선을
+  // 직접 그리게 되면서 타일까지 같이 켜두면 얇은 타일 선과 굵은 벡터 선이 겹쳐
+  // 지저분해 보여 제거했다. 그리는 순서가 중요 — 선을 맨 밑에 깔고, 그 위에
+  // 출구·역 마커를 얹어야 마커가 선에 가려지지 않는다.
+  addSubwayLines(L, map);
+  addSubwayExits(L, map);
   addSubwayStations(L, map);
 
   if (markers.length > 1) {
