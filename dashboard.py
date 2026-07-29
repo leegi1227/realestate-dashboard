@@ -115,6 +115,7 @@ def render_address_map(
     lon_col: str = "lon",
     label_col: str = None,
     show_labels: bool = True,
+    vworld_key: str = None,
     enable_selection: bool = False,
     selection_key: str = None,
     highlight_lat: float = None,
@@ -125,10 +126,11 @@ def render_address_map(
     주소도 표시한다. show_labels=False면 마커만 표시해 지점이 아주 많을 때 더 깔끔하게
     볼 수 있다.
 
-    실제 렌더링은 address_map_component/(Leaflet+OpenStreetMap을 삽입한 커스텀
-    Streamlit 컴포넌트)가 담당한다 — API 키나 도메인 등록이 필요 없다. 이 함수는
-    파이썬 쪽에서 라벨 중복 제거, 겹침 방지용 세로 스택 단계 계산까지만 하고 나머지는
-    컴포넌트에 데이터로 넘긴다.
+    실제 렌더링은 address_map_component/(Leaflet을 삽입한 커스텀 Streamlit
+    컴포넌트)가 담당한다 — 기본 배경지도(OpenStreetMap)는 키가 필요 없고,
+    vworld_key를 넘기면 배경지도를 브이월드(국토지리정보원) 공식 지도로 바꾼다.
+    이 함수는 파이썬 쪽에서 라벨 중복 제거, 겹침 방지용 세로 스택 단계 계산까지만
+    하고 나머지는 컴포넌트에 데이터로 넘긴다.
 
     enable_selection=True면 마커 클릭을 감지해서, 클릭된 지점의 데이터(주소/lat/lon이
     담긴 dict)를 반환한다(클릭이 없으면 None).
@@ -192,6 +194,7 @@ def render_address_map(
             "showLabels": show_labels,
             "enableSelection": enable_selection,
             "singleZoom": zoom if len(plot_df) <= 1 else 17,
+            "vworldKey": vworld_key,
         },
         height=460,
         **component_kwargs,
@@ -260,6 +263,15 @@ with st.sidebar:
              "이 앱의 좌표 조회 기능은 전부 카카오로 전환했습니다.",
     )
     kakao_key = kakao_key.strip() if kakao_key else None
+
+    vworld_key = st.text_input(
+        "브이월드(V-World) 인증키 (선택)",
+        value="",
+        type="password",
+        placeholder="지도 배경을 브이월드 지도로 쓰려면 입력 (없어도 기본 배경지도로 정상 동작)",
+        help="https://www.vworld.kr 에서 발급. 지도의 배경지도를 브이월드 공식 지도로 바꾸는 데만 쓰입니다.",
+    )
+    vworld_key = vworld_key.strip() if vworld_key else None
 
     reb_key = st.text_input(
         "한국부동산원 인증키 (선택)",
@@ -635,7 +647,7 @@ with tab_price:
             if not map_df.empty:
                 st.subheader("🗺️ 거래 위치 지도")
                 st.caption(f"좌표가 확인된 {len(map_df)}/{len(tp_df)}건을 표시합니다.")
-                render_address_map(map_df, lat_col="위도", lon_col="경도", label_col="주소")
+                render_address_map(map_df, lat_col="위도", lon_col="경도", label_col="주소", vworld_key=vworld_key)
 
 # ------------------------------------------------------------------
 # 탭 4: 동단위 통계
@@ -851,7 +863,7 @@ with tab_map:
 
                 selected = render_address_map(
                     plot_df, label_col="주소" if addr_col else None,
-                    show_labels=show_labels,
+                    show_labels=show_labels, vworld_key=vworld_key,
                     enable_selection=True, selection_key="map_upload_selection",
                     highlight_lat=highlight_lat, highlight_lon=highlight_lon,
                 )
@@ -922,7 +934,7 @@ with tab_geocode:
                 c2.metric("위도 (lat)", f"{lat:.6f}")
                 render_address_map(
                     pd.DataFrame({"lat": [lat], "lon": [lon], "주소": [found_addr]}),
-                    label_col="주소",
+                    label_col="주소", vworld_key=vworld_key,
                 )
             else:
                 st.error(f"좌표를 찾지 못했습니다 ({reason}). 주소를 다시 확인해주세요.")
@@ -977,7 +989,7 @@ with tab_geocode:
             )
             map_df = batch_result.dropna(subset=["위도", "경도"])
             if not map_df.empty:
-                render_address_map(map_df, lat_col="위도", lon_col="경도", label_col="주소")
+                render_address_map(map_df, lat_col="위도", lon_col="경도", label_col="주소", vworld_key=vworld_key)
 
 # ------------------------------------------------------------------
 # 탭 10: 상업용부동산 공실률 (한국부동산원 R-ONE Open API)

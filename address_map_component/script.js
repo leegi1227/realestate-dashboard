@@ -65,10 +65,19 @@ function renderMap(L, mapEl, data, setTriggerValue) {
     [first ? first.lat : 37.5665, first ? first.lon : 126.9780],
     data.singleZoom || 17,
   );
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 19,
-    attribution: "&copy; OpenStreetMap contributors",
-  }).addTo(map);
+  if (data.vworldKey) {
+    // 브이월드 배경지도(WMTS). 경로가 {z}/{y}/{x} 순서인 건 브이월드 쪽 규격 —
+    // Leaflet은 URL 안의 플레이스홀더를 그대로 치환할 뿐이라 순서를 바꿔 써도 된다.
+    L.tileLayer(
+      `https://api.vworld.kr/req/wmts/1.0.0/${data.vworldKey}/Base/{z}/{y}/{x}.png`,
+      { maxZoom: 19, minZoom: 5, tileSize: 256, attribution: "&copy; VWorld" },
+    ).addTo(map);
+  } else {
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: "&copy; OpenStreetMap contributors",
+    }).addTo(map);
+  }
 
   if (markers.length > 1) {
     const bounds = L.latLngBounds(markers.map((m) => [m.lat, m.lon]));
