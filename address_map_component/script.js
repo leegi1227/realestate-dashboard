@@ -136,6 +136,19 @@ function renderMap(L, mapEl, data, setTriggerValue) {
     addOsmLayer();
   }
 
+  // 지하철역·노선 오버레이 — OpenRailwayMap(무료, 키 불필요, OSM 데이터 기반).
+  // 배경지도(브이월드든 OSM이든) 위에 얹어서 노선 색상·역명·(대장홍대선처럼
+  // 아직 미개통인 노선은 점선으로 구분) 그대로 보여준다. 데이터가 없는 곳은
+  // 타일이 투명이라 배경지도를 가리지 않는다.
+  L.tileLayer("https://{s}.tiles.openrailwaymap.org/standard/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    minZoom: 2,
+    subdomains: "abc",
+    attribution:
+      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, ' +
+      'Style: <a href="http://www.openrailwaymap.org/">OpenRailwayMap</a>',
+  }).addTo(map);
+
   if (markers.length > 1) {
     const bounds = L.latLngBounds(markers.map((m) => [m.lat, m.lon]));
     map.fitBounds(bounds, { padding: [50, 50] });
