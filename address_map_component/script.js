@@ -96,18 +96,40 @@ function renderMap(L, mapEl, data, setTriggerValue) {
     [first ? first.lat : 37.5665, first ? first.lon : 126.9780],
     data.singleZoom || 17,
   );
+  function addOsmLayer(attributionSuffix) {
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: "&copy; OpenStreetMap contributors" + (attributionSuffix || ""),
+    }).addTo(map);
+  }
+
   if (data.vworldKey) {
     // 브이월드 배경지도(WMTS). 경로가 {z}/{y}/{x} 순서인 건 브이월드 쪽 규격 —
     // Leaflet은 URL 안의 플레이스홀더를 그대로 치환할 뿐이라 순서를 바꿔 써도 된다.
-    L.tileLayer(
+    const vworldLayer = L.tileLayer(
       `https://api.vworld.kr/req/wmts/1.0.0/${data.vworldKey}/Base/{z}/{y}/{x}.png`,
       { maxZoom: 19, minZoom: 5, tileSize: 256, attribution: "&copy; VWorld" },
-    ).addTo(map);
+    );
+    // 브이월드는 해외 클라우드(AWS/GCP 등) IP를 정책적으로 차단한다(공간정보관리법
+    // 제16조 국외반출 제한 근거 — 지오코딩 API에서 먼저 확인된 것과 동일한 제한이
+    // 지도 타일 API에도 적용되는 것으로 보인다). 이 경우 Streamlit Cloud 배포본에서는
+    // 타일이 전부 회색 빈 화면으로 나온다. 키 오류든 이 차단이든, 타일이 연달아
+    // 여러 장 실패하면(일시적 네트워크 hiccup과 구분하기 위해 즉시 전환하지 않고
+    // 몇 장은 봐준다) 사용자가 빈 지도만 보는 것보다는 OSM으로 자동 전환해 최소한
+    // 지도 자체는 항상 뜨게 한다.
+    let vworldFailCount = 0;
+    let fellBack = false;
+    vworldLayer.on("tileerror", () => {
+      vworldFailCount += 1;
+      if (!fellBack && vworldFailCount >= 3) {
+        fellBack = true;
+        map.removeLayer(vworldLayer);
+        addOsmLayer(" (브이월드 타일 로드 실패로 자동 전환됨 — 배포 환경에서는 해외 IP 차단 정책 때문일 수 있음)");
+      }
+    });
+    vworldLayer.addTo(map);
   } else {
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      maxZoom: 19,
-      attribution: "&copy; OpenStreetMap contributors",
-    }).addTo(map);
+    addOsmLayer();
   }
 
   if (markers.length > 1) {
@@ -164,11 +186,38 @@ function renderMap(L, mapEl, data, setTriggerValue) {
   return map;
 }
 
+// 전체화면 버튼에 클릭 리스너를 단 적이 있는 버튼 엘리먼트를 기억해둔다 —
+// export default function은 rerun마다 다시 호출되는데, 버튼 자체는 #map-wrap의
+// 형제 엘리먼트라 mapEl.innerHTML 초기화의 영향을 안 받고 계속 살아있으므로,
+// 매번 리스너를 새로 달면 중복 등록돼 한 번 클릭에 여러 번 토글되는 버그가 난다.
+const expandWired = new WeakSet();
+
+function wireExpandButton(wrapEl, btnEl, getMap) {
+  if (expandWired.has(btnEl)) return;
+  expandWired.add(btnEl);
+  btnEl.addEventListener("click", () => {
+    const isFull = wrapEl.classList.toggle("kmc-fullscreen");
+    btnEl.textContent = isFull ? "✕" : "⛶";
+    btnEl.title = isFull ? "지도 원래 크기로" : "지도 크게 보기";
+    const map = getMap();
+    if (map) {
+      // 크기가 바뀐 다음 프레임에 재보게 해야 Leaflet이 새 크기로 타일을 다시 배치한다.
+      requestAnimationFrame(() => map.invalidateSize());
+    }
+  });
+}
+
 export default function (component) {
   const { data, parentElement, setTriggerValue } = component;
+  const wrapEl = parentElement.querySelector("#map-wrap");
   const mapEl = parentElement.querySelector("#map");
+  const expandBtn = parentElement.querySelector("#kmc-expand");
   const errorEl = parentElement.querySelector("#error");
   if (!mapEl || !errorEl) return;
+
+  if (wrapEl && expandBtn) {
+    wireExpandButton(wrapEl, expandBtn, () => mapInstances.get(mapEl));
+  }
 
   function showError(msg) {
     errorEl.textContent = msg;
