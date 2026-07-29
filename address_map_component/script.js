@@ -196,12 +196,13 @@ function renderMap(L, mapEl, data, setTriggerValue) {
     data.singleZoom || 17,
   );
   function addOsmLayer(attributionSuffix) {
-    // 표준 OSM 타일(tile.openstreetmap.org)은 상점·업종 아이콘/라벨(예: "F&B" 같은
-    // 프랜차이즈·업종 텍스트)이 촘촘히 박혀 있어, 이미 지하철 노선·역·출구까지 얹은
-    // 지도에서는 너무 산만해 보인다는 피드백을 받았다. 라벨을 최소화한 CartoDB
-    // Positron("light_all") 스타일로 교체 — 데이터 출처는 동일하게 OSM이고 키도
-    // 필요 없다(연남동 상권분석 PPTX 지도 작업에서도 같은 스타일을 썼다).
-    L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png", {
+    // 표준 OSM 타일(tile.openstreetmap.org)은 상점·업종 아이콘/라벨이 촘촘히 박혀
+    // 있어 지하철 노선·역·출구까지 얹은 지도에서 산만했다 — 그래서 CartoDB
+    // Positron("light_all")으로 바꿨는데, 이번엔 건물이 거의 안 보일 정도로
+    // 옅게 나온다는 피드백을 받았다(부동산 앱에서 건물이 안 보이면 곤란).
+    // Positron과 표준 OSM 사이 절충점인 "Voyager"로 교체 — 건물이 뚜렷한 크림색
+    // 채움으로 보이면서도 표준 OSM만큼 상점 아이콘이 빽빽하진 않다.
+    L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png", {
       maxZoom: 19,
       subdomains: "abcd",
       attribution: "&copy; OpenStreetMap contributors &copy; CARTO" + (attributionSuffix || ""),
