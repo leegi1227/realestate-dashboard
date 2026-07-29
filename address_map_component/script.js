@@ -106,8 +106,12 @@ function renderMap(L, mapEl, data, setTriggerValue) {
   if (data.vworldKey) {
     // 브이월드 배경지도(WMTS). 경로가 {z}/{y}/{x} 순서인 건 브이월드 쪽 규격 —
     // Leaflet은 URL 안의 플레이스홀더를 그대로 치환할 뿐이라 순서를 바꿔 써도 된다.
+    // "Base"(기본 참조지도)는 건물을 옅은 외곽선으로만 그려 건물이 잘 안 보인다는
+    // 피드백을 받아 "Hybrid"(항공사진 + 라벨)로 바꿨다 — 실제 건물 형태가 항공
+    // 사진으로 그대로 보인다. 다른 선택지: Satellite(라벨 없는 순수 항공사진),
+    // White(최소한의 백지도), Midnight(Base의 야간 버전).
     const vworldLayer = L.tileLayer(
-      `https://api.vworld.kr/req/wmts/1.0.0/${data.vworldKey}/Base/{z}/{y}/{x}.png`,
+      `https://api.vworld.kr/req/wmts/1.0.0/${data.vworldKey}/Hybrid/{z}/{y}/{x}.png`,
       { maxZoom: 19, minZoom: 5, tileSize: 256, attribution: "&copy; VWorld" },
     );
     // 브이월드는 해외 클라우드(AWS/GCP 등) IP를 정책적으로 차단한다(공간정보관리법
