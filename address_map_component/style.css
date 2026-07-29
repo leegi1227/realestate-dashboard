@@ -60,6 +60,12 @@
 .leaflet-tooltip.kmc-label::before {
   display: none;
 }
+/* Leaflet의 기본 div 아이콘은 흰 배경+테두리 박스를 깔아서 원형 배지만
+   깔끔하게 보이게 하려면 지워야 한다. */
+.leaflet-div-icon.kmc-subway-icon {
+  background: transparent;
+  border: none;
+}
 .kmc-error {
   display: none;
   padding: 12px;

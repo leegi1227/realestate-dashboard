@@ -60,6 +60,13 @@ with open(os.path.join(_address_map_dir, "style.css"), encoding="utf-8") as _f:
     _address_map_css = _f.read()
 with open(os.path.join(_address_map_dir, "script.js"), encoding="utf-8") as _f:
     _address_map_js = _f.read()
+with open(os.path.join(_address_map_dir, "subway_stations.json"), encoding="utf-8") as _f:
+    _subway_stations_json = _f.read()
+
+# 서울 지하철역(노선색 배지 표시용) 데이터를 컴포넌트 JS에 정적으로 박아 넣는다 — 매
+# rerun마다 data=로 다시 보내면 35KB를 매번 소켓에 실어야 하지만, js= 문자열 자체에
+# 넣으면 컴포넌트 등록 시 한 번만 전달된다. 이 데이터는 절대 안 바뀌므로 안전하다.
+_address_map_js = _address_map_js.replace('"__SUBWAY_STATIONS_JSON__"', _subway_stations_json)
 
 _address_map_component = st.components.v2.component(
     "address_map", html=_address_map_html, css=_address_map_css, js=_address_map_js,

@@ -7,6 +7,14 @@ const PIN_IMAGE_URL = "data:image/svg+xml;base64," + btoa(PIN_SVG);
 const LEAFLET_CSS_URL = "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css";
 const LEAFLET_JS_URL = "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js";
 
+// 서울 지하철역 목록: [역명, 위도, 경도, [[노선번호/약칭, 노선색], ...]]. OpenStreetMap의
+// route=subway/light_rail/train(수도권) relation에서 정거장(stop) 멤버를 모아 역명으로
+// 묶고, 각 relation의 ref/colour(공식 노선 번호·색)를 그대로 붙인 것 — dashboard.py가
+// import 시점에 subway_stations.json 내용을 아래 자리에 그대로 채워 넣는다(매 rerun마다
+// 35KB를 다시 보내지 않도록, data=가 아니라 컴포넌트 js= 문자열에 정적으로 박아 넣는
+// 방식). 카카오맵/네이버처럼 역마다 노선색 원형 배지로 표시하는 데 쓴다.
+const SUBWAY_STATIONS = "__SUBWAY_STATIONS_JSON__";
+
 // Leaflet의 JS 라이브러리(window.L)는 페이지에 하나만 있으면 되는 전역이라
 // 모듈 스코프에 캐시해서 앱 전체(탭이 여러 개라 컴포넌트 인스턴스도 여러 개)가
 // 공유한다 — CSS와 달리 섀도 DOM 경계와 무관하게 그냥 전역 객체라 공유해도 된다.
@@ -74,6 +82,45 @@ function ensureLeafletCss(root) {
 // 손으로 옮겨둔 팬/줌 위치도 계속 초기화돼서 매우 느리고 거슬리게 느껴진다).
 const mapInstances = new WeakMap();
 const lastRenderedData = new WeakMap();
+
+function getSubwayStations() {
+  // dashboard.py가 import 시점에 "__SUBWAY_STATIONS_JSON__" 자리(따옴표째로)를 실제
+  // 배열 리터럴 텍스트로 치환해 넣으므로, 정상적인 경우 SUBWAY_STATIONS는 이미 배열이다
+  // (JSON.parse 불필요). 치환이 어떤 이유로든 안 되면 문자열 그대로 남아 .forEach가
+  // 없어 에러가 나는데, 그래도 지도 전체가 죽지 않도록 역 표시만 조용히 건너뛴다.
+  return Array.isArray(SUBWAY_STATIONS) ? SUBWAY_STATIONS : [];
+}
+
+function addSubwayStations(L, map) {
+  getSubwayStations().forEach(([name, lat, lon, lines]) => {
+    const badges = lines
+      .map(([ref, colour]) => {
+        const label = [...ref].length > 2 ? [...ref].slice(0, 2).join("") : ref;
+        // 주의: 이 문자열은 HTML style="..." 속성값(큰따옴표)이라, 안의 CSS에서
+        // font-family를 큰따옴표로 감싸면("Malgun Gothic") 브라우저 HTML 파서가
+        // 거기서 style 속성이 끝난 걸로 오해해 그 뒤(border/box-shadow/nowrap/
+        // word-break 전부)가 조용히 엉뚱한 속성으로 깨진다(겉보기엔 에러 없이
+        // 그냥 스타일만 안 먹힘 — 두 글자 라벨이 원 안에서 위아래로 쪼개져 보이던
+        // 진짜 원인이 이거였다). CSS 문자열 쪽은 항상 작은따옴표로 감싼다.
+        return (
+          '<span style="display:inline-flex;align-items:center;justify-content:center;' +
+          "width:22px;height:22px;border-radius:50%;background:" + colour + ";color:#fff;" +
+          "font:bold 8.5px/1 -apple-system,'Malgun Gothic',sans-serif;border:1.5px solid #fff;" +
+          "box-shadow:0 0 2px rgba(0,0,0,.6);margin-left:-6px;" +
+          'white-space:nowrap;word-break:keep-all;overflow:visible;">' + label + "</span>"
+        );
+      })
+      .join("");
+    const icon = L.divIcon({
+      className: "kmc-subway-icon",
+      html: '<div style="display:flex;padding-left:5px;">' + badges + "</div>",
+      iconSize: null,
+    });
+    L.marker([lat, lon], { icon, keyboard: false })
+      .bindTooltip(name, { direction: "top", offset: [0, -10] })
+      .addTo(map);
+  });
+}
 
 // data와 setTriggerValue를 그대로 인자로 받아 클로저에 가둔다 — 컴포넌트
 // 인스턴스가 여러 개(대시보드 탭마다 하나씩)라도 서로의 콜백을 침범하지 않는다.
@@ -148,6 +195,13 @@ function renderMap(L, mapEl, data, setTriggerValue) {
       '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, ' +
       'Style: <a href="http://www.openrailwaymap.org/">OpenRailwayMap</a>',
   }).addTo(map);
+
+  // 역마다 카카오맵/네이버맵 스타일의 노선색 원형 배지(SUBWAY_STATIONS, 위에서 정의)를
+  // 얹는다 — OpenRailwayMap 타일은 얇은 선이라 "역이 잘 안 보인다"는 피드백을 받아
+  // 추가한 것. 타일과 달리 벡터라 항상 뚜렷하게 보이고, 여러 노선이 겹치는 역은
+  // 배지가 옆으로 나란히 붙는다. 정차역 개수가 많아(500곳 이상) 매번 새로 만들어도
+  // 성능에 문제없다 — 지도 자체를 이미 통째로 새로 만드는 rerun에서만 같이 실행된다.
+  addSubwayStations(L, map);
 
   if (markers.length > 1) {
     const bounds = L.latLngBounds(markers.map((m) => [m.lat, m.lon]));
