@@ -46,22 +46,23 @@ from building_example import (
 )
 
 
-# 카카오맵 JS SDK를 삽입하는 Custom Components v2 컴포넌트 (기존 pydeck 렌더링을 대체).
-# components.v1.declare_component(구 iframe+postMessage 프로토콜)는 이 Streamlit 버전에서
-# 최초 마운트 시 컴포넌트가 준비 신호를 보내도 렌더 이벤트를 받지 못하고 조용히 멈추는
-# 문제가 있었다(재현 확인 — 공식 트러블슈팅 문서에도 "가장 흔한 v1 실패 증상"으로 명시돼
-# 있음). v2(`st.components.v2.component`)는 iframe 없이 같은 페이지에 직접(섀도우 DOM)
-# 마운트되고 핸드셰이크가 필요 없어 이 문제가 없다.
-_kakao_map_dir = os.path.join(os.path.dirname(__file__), "kakao_map_component")
-with open(os.path.join(_kakao_map_dir, "template.html"), encoding="utf-8") as _f:
-    _kakao_map_html = _f.read()
-with open(os.path.join(_kakao_map_dir, "style.css"), encoding="utf-8") as _f:
-    _kakao_map_css = _f.read()
-with open(os.path.join(_kakao_map_dir, "script.js"), encoding="utf-8") as _f:
-    _kakao_map_js = _f.read()
+# Leaflet + OpenStreetMap을 삽입하는 Custom Components v2 컴포넌트 (기존 pydeck
+# 렌더링을 대체). 처음에는 카카오맵 JS SDK로 구현했으나, 배포 환경에서 SDK 요청이
+# 브라우저의 ORB(Opaque Response Blocking)에 막혀 키/도메인 설정이 맞아도 계속
+# 실패했다(카카오 서버가 401을 JSON으로 응답 → 브라우저가 script 태그로 받은
+# JSON 응답을 차단). API 키나 도메인 등록이 아예 필요 없는 Leaflet+OSM으로 교체해
+# 이 문제 자체를 없앴다. (컴포넌트 프로토콜 자체는 v1의 iframe+postMessage 방식이
+# 이 Streamlit 버전에서 먹통이라 이미 v2로 전환해 둔 상태 — 그 부분은 그대로 재사용)
+_address_map_dir = os.path.join(os.path.dirname(__file__), "address_map_component")
+with open(os.path.join(_address_map_dir, "template.html"), encoding="utf-8") as _f:
+    _address_map_html = _f.read()
+with open(os.path.join(_address_map_dir, "style.css"), encoding="utf-8") as _f:
+    _address_map_css = _f.read()
+with open(os.path.join(_address_map_dir, "script.js"), encoding="utf-8") as _f:
+    _address_map_js = _f.read()
 
-_kakao_map_component = st.components.v2.component(
-    "kakao_map", html=_kakao_map_html, css=_kakao_map_css, js=_kakao_map_js,
+_address_map_component = st.components.v2.component(
+    "address_map", html=_address_map_html, css=_address_map_css, js=_address_map_js,
 )
 
 
@@ -114,20 +115,20 @@ def render_address_map(
     lon_col: str = "lon",
     label_col: str = None,
     show_labels: bool = True,
-    kakao_js_key: str = None,
     enable_selection: bool = False,
     selection_key: str = None,
     highlight_lat: float = None,
     highlight_lon: float = None,
 ):
-    """지점을 구글 지도 스타일 핀으로 카카오맵 위에 표시하고, show_labels=True면 핀 옆에
+    """지점을 구글 지도 스타일 핀으로 지도 위에 표시하고, show_labels=True면 핀 옆에
 
     주소도 표시한다. show_labels=False면 마커만 표시해 지점이 아주 많을 때 더 깔끔하게
-    볼 수 있다. kakao_js_key가 없으면 지도를 그리지 않고 안내 문구만 보여준다.
+    볼 수 있다.
 
-    실제 렌더링은 kakao_map_component/index.html(카카오맵 JS SDK를 삽입한 커스텀
-    Streamlit 컴포넌트)이 담당한다 — 이 함수는 파이썬 쪽에서 라벨 중복 제거, 겹침
-    방지용 세로 스택 단계 계산까지만 하고 나머지는 컴포넌트에 데이터로 넘긴다.
+    실제 렌더링은 address_map_component/(Leaflet+OpenStreetMap을 삽입한 커스텀
+    Streamlit 컴포넌트)가 담당한다 — API 키나 도메인 등록이 필요 없다. 이 함수는
+    파이썬 쪽에서 라벨 중복 제거, 겹침 방지용 세로 스택 단계 계산까지만 하고 나머지는
+    컴포넌트에 데이터로 넘긴다.
 
     enable_selection=True면 마커 클릭을 감지해서, 클릭된 지점의 데이터(주소/lat/lon이
     담긴 dict)를 반환한다(클릭이 없으면 None).
@@ -137,10 +138,6 @@ def render_address_map(
     표 → 지도 방향 강조(이 옵션)와 지도 → 표 방향 강조(enable_selection)는 서로
     독립적으로 켤 수 있다.
     """
-    if not kakao_js_key:
-        st.caption("카카오맵 JavaScript 키를 입력하면 지도를 표시합니다.")
-        return None
-
     plot_df = df.copy()
     if label_col and label_col in plot_df.columns:
         plot_df["주소"] = plot_df[label_col].astype(str)
@@ -187,14 +184,14 @@ def render_address_map(
         # 결과 객체에 노출된다 — 실제로 콜백을 쓸 필요는 없어 빈 함수를 넘긴다.
         component_kwargs["on_selected_change"] = lambda: None
 
-    result = _kakao_map_component(
+    result = _address_map_component(
         key=selection_key,
         data={
-            "kakaoJsKey": kakao_js_key,
             "markers": markers,
             "highlight": highlight,
             "showLabels": show_labels,
             "enableSelection": enable_selection,
+            "singleZoom": zoom if len(plot_df) <= 1 else 17,
         },
         height=460,
         **component_kwargs,
@@ -263,17 +260,6 @@ with st.sidebar:
              "이 앱의 좌표 조회 기능은 전부 카카오로 전환했습니다.",
     )
     kakao_key = kakao_key.strip() if kakao_key else None
-
-    kakao_js_key = st.text_input(
-        "카카오맵 JavaScript 키 (선택)",
-        value="",
-        type="password",
-        placeholder="지도 화면 표시에 사용 (REST API 키와 다른 값)",
-        help="https://developers.kakao.com 앱 설정의 'JavaScript 키'. 위 REST API 키와는 "
-             "다른 값이며, 이 키를 쓰려면 카카오 개발자 콘솔의 '플랫폼 > Web'에 이 앱이 "
-             "배포된 도메인을 등록해야 지도가 표시됩니다.",
-    )
-    kakao_js_key = kakao_js_key.strip() if kakao_js_key else None
 
     reb_key = st.text_input(
         "한국부동산원 인증키 (선택)",
@@ -649,7 +635,7 @@ with tab_price:
             if not map_df.empty:
                 st.subheader("🗺️ 거래 위치 지도")
                 st.caption(f"좌표가 확인된 {len(map_df)}/{len(tp_df)}건을 표시합니다.")
-                render_address_map(map_df, lat_col="위도", lon_col="경도", label_col="주소", kakao_js_key=kakao_js_key)
+                render_address_map(map_df, lat_col="위도", lon_col="경도", label_col="주소")
 
 # ------------------------------------------------------------------
 # 탭 4: 동단위 통계
@@ -865,7 +851,7 @@ with tab_map:
 
                 selected = render_address_map(
                     plot_df, label_col="주소" if addr_col else None,
-                    show_labels=show_labels, kakao_js_key=kakao_js_key,
+                    show_labels=show_labels,
                     enable_selection=True, selection_key="map_upload_selection",
                     highlight_lat=highlight_lat, highlight_lon=highlight_lon,
                 )
@@ -936,7 +922,7 @@ with tab_geocode:
                 c2.metric("위도 (lat)", f"{lat:.6f}")
                 render_address_map(
                     pd.DataFrame({"lat": [lat], "lon": [lon], "주소": [found_addr]}),
-                    label_col="주소", kakao_js_key=kakao_js_key,
+                    label_col="주소",
                 )
             else:
                 st.error(f"좌표를 찾지 못했습니다 ({reason}). 주소를 다시 확인해주세요.")
@@ -991,7 +977,7 @@ with tab_geocode:
             )
             map_df = batch_result.dropna(subset=["위도", "경도"])
             if not map_df.empty:
-                render_address_map(map_df, lat_col="위도", lon_col="경도", label_col="주소", kakao_js_key=kakao_js_key)
+                render_address_map(map_df, lat_col="위도", lon_col="경도", label_col="주소")
 
 # ------------------------------------------------------------------
 # 탭 10: 상업용부동산 공실률 (한국부동산원 R-ONE Open API)
