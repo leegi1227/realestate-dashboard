@@ -1022,6 +1022,91 @@ def get_vworld_zoning_detail(vworld_key: str, lon: float, lat: float, retries: i
     return result
 
 
+REB_COMMERCIAL_VACANCY_STATBL_IDS = {
+    "오피스": "TT244763134428698",
+    "중대형 상가": "T249633134845544",
+    "소규모 상가": "T241833134686576",
+    "집합 상가": "T243283134931290",
+    "일반 상가": "T262303140824764",
+}
+# 위 통계표들은 모두 "2024년 3분기~" 데이터만 담고 있다. 2022년~2024년 2분기는
+# 별도 통계표코드(A_2024_0025X)인데, 한국부동산원이 '24년 2분기에 상권을
+# 재구획·표본재설계해서 두 시기의 상권 분류코드가 어긋날 수 있다 — 자동으로
+# 이어붙이면 실제로는 다른 상권을 같은 상권인 것처럼 보여줄 위험이 있어서,
+# 재구획 이후(2024년 3분기~) 표만 쓴다.
+
+REB_OPENAPI_BASE = "https://www.reb.or.kr/r-one/openapi"
+
+
+def reb_current_quarter_id(today: datetime.date = None) -> str:
+    """오늘 날짜 기준 분기 시점 ID(예: 2026년 3분기 -> "202603")를 계산."""
+    today = today or datetime.date.today()
+    quarter = (today.month - 1) // 3 + 1
+    return f"{today.year}{quarter:02d}"
+
+
+def _reb_prev_quarter_id(wrttime_id: str) -> str:
+    year, quarter = int(wrttime_id[:4]), int(wrttime_id[4:6])
+    return f"{year - 1}04" if quarter == 1 else f"{year}{quarter - 1:02d}"
+
+
+def reb_quarter_ids_desc(start_wrttime: str, end_wrttime: str) -> list:
+    """start_wrttime~end_wrttime 구간의 분기 시점 ID를 최신순으로 나열 (선택박스용)."""
+    ids = []
+    current = end_wrttime
+    while True:
+        ids.append(current)
+        if current == start_wrttime:
+            break
+        current = _reb_prev_quarter_id(current)
+    return ids
+
+
+def _reb_request(reb_key: str, statbl_id: str, **params):
+    """SttsApiTblData를 호출해 (DataFrame, 안내메시지) 튜플로 반환.
+
+    데이터가 없으면(INFO-200) 빈 DataFrame과 안내 메시지를, 정상이면
+    데이터가 담긴 DataFrame과 None을 반환한다. 그 외 에러(ERROR-*)는
+    예외로 올려서 호출부가 st.error로 그대로 보여줄 수 있게 한다.
+    """
+    url = f"{REB_OPENAPI_BASE}/SttsApiTblData.do"
+    query = {"KEY": reb_key, "STATBL_ID": statbl_id, "Type": "json", "DTACYCLE_CD": "QY", **params}
+    res = requests.get(url, params=query, timeout=15)
+    res.raise_for_status()
+    data = res.json()
+    if "SttsApiTblData" not in data:
+        result = data.get("RESULT", {})
+        code, message = result.get("CODE"), result.get("MESSAGE", "알 수 없는 오류")
+        if code == "INFO-200":
+            return pd.DataFrame(), message
+        raise RuntimeError(f"한국부동산원 API 오류({code}): {message}")
+    rows = data["SttsApiTblData"][1].get("row") or []
+    return pd.DataFrame(rows), None
+
+
+def get_reb_vacancy_snapshot(reb_key: str, statbl_id: str, wrttime_id: str, max_lookback: int = 2):
+    """한 분기의 전체 상권 공실률을 조회. 데이터가 없으면 최대 max_lookback개 이전
+
+    분기까지 자동으로 물러나며 재시도한다(발표 지연으로 최신 분기가 아직 없을 수
+    있어서). 반환값: (DataFrame, 실제로 사용된 wrttime_id, 안내메시지 또는 None).
+    """
+    current = wrttime_id
+    for _ in range(max_lookback + 1):
+        df, message = _reb_request(reb_key, statbl_id, WRTTIME_IDTFR_ID=current, pSize=1000)
+        if not df.empty:
+            return df, current, None
+        current = _reb_prev_quarter_id(current)
+    return pd.DataFrame(), wrttime_id, message
+
+
+def get_reb_vacancy_trend(reb_key: str, statbl_id: str, cls_id, start_wrttime: str, end_wrttime: str):
+    """특정 상권(cls_id)의 start_wrttime~end_wrttime 구간 분기별 공실률 추이를 조회."""
+    df, message = _reb_request(
+        reb_key, statbl_id, CLS_ID=cls_id, START_WRTTIME=start_wrttime, END_WRTTIME=end_wrttime, pSize=1000,
+    )
+    return df, message
+
+
 def combine_zoning_sources(master: dict) -> list:
     """건축HUB 표제부의 지역지구구역 + 브이월드 레이어 조회 결과를 하나의 중복 없는 목록으로 합침"""
     combined = list(master.get("지역지구") or [])

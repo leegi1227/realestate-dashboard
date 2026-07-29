@@ -19,18 +19,33 @@
   개발자 콘솔에서 같은 앱 안에 별도로 발급되는 서로 다른 값이다.
 - "브이월드 키" 입력란, `_vworld_basemap_style()` 함수, `render_address_map()`의
   `vworld_key` 파라미터, 그리고 모든 호출부의 `vworld_key=vworld_key` 인자를 제거한다.
-- pydeck 기반 렌더링을 제거하고, 카카오맵 JS SDK를 삽입하는 **커스텀 Streamlit
-  컴포넌트**로 교체한다. `st.components.v1.html()`(단방향)이 아니라
-  `st.components.v1.declare_component(path=...)` 로 등록하는 정적 `index.html` 한
-  장을 사용한다 — 빌드 과정 없이, Streamlit이 공개적으로 사용하는 iframe
-  `postMessage` 프로토콜(`streamlit:componentReady` /
-  `streamlit:render` / `streamlit:setFrameHeight` /
-  `streamlit:setComponentValue`)을 직접 구현해 마커 클릭 값을 파이썬으로 돌려받는다.
-- 새 디렉터리 `kakao_map_component/index.html` 1개 파일만 추가한다. 좌표/라벨
-  데이터는 매 호출마다 컴포넌트 인자(args)로 전달되므로 이 파일은 재생성할 필요가
-  없다.
+- pydeck 기반 렌더링을 제거하고, 카카오맵 JS SDK를 삽입하는 **Custom Components v2**
+  (`st.components.v2.component(name, html=, css=, js=)`) 컴포넌트로 교체한다.
+
+  > **구현 중 변경**: 최초 설계는 `st.components.v1.declare_component(path=...)` +
+  > 직접 구현한 iframe `postMessage` 핸드셰이크(`streamlit:componentReady` 등)였다.
+  > 로컬 검증 중 이 조합이 이 Streamlit 버전(1.60)에서 **최초 마운트 시 컴포넌트가
+  > 준비 신호를 반복 전송해도 렌더 이벤트를 영영 받지 못하고 조용히 빈 화면으로
+  > 남는** 문제를 재현했다(Streamlit 자체에 번들된
+  > `.agents/skills/developing-with-streamlit/references/ccv2-troubleshooting.md`
+  > 문서에도 "v1 오염 — 가장 흔한 실패 증상: 컴포넌트가 빈 iframe으로 렌더되고
+  > 파이썬과 통신이 안 됨"으로 정확히 명시돼 있었다). 같은 문서가 v1은 legacy이며
+  > 신규 컴포넌트는 반드시 v2를 쓰라고 명시하고 있어, v2로 전환했다. v2는 iframe이
+  > 아니라 같은 페이지의 섀도우 DOM에 직접 마운트되고 준비 핸드셰이크 자체가 없어
+  > 이 문제가 구조적으로 발생하지 않는다 — 실제로 전환 직후 첫 시도부터 정상
+  > 동작을 확인했다.
+- 컴포넌트 정의는 `kakao_map_component/` 아래 `template.html`(내부 마크업),
+  `style.css`, `script.js`(ES 모듈, `export default function(component)`) 세
+  파일로 두고, `dashboard.py`가 모듈 임포트 시점에 파일 내용을 읽어 문자열로
+  `st.components.v2.component(...)`에 전달한다(경로가 아니라 내용 자체를 넘겨야
+  "인라인 콘텐츠"로 확실히 인식됨 — CCv2는 여러 줄 문자열을 항상 인라인으로
+  취급).
+- JS → 파이썬 값 전달은 v1의 `Streamlit.setComponentValue`가 아니라 v2의
+  `setTriggerValue("selected", {...})` + 마운트 시 `on_selected_change=lambda: None`
+  콜백 등록 + 반환된 `result.selected` 조합을 쓴다.
 - `render_address_map()`의 함수 시그니처는 최대한 유지한다
-  (`vworld_key` 제거, `kakao_js_key` 추가). 5곳의 호출부는 인자 이름만 바뀐다.
+  (`vworld_key` 제거, `kakao_js_key` 추가). 4곳의 호출부는 인자 이름만 바뀐다
+  (통합 리포트 탭 삭제로 기존 5곳 중 1곳은 이미 없어짐).
 
 ## 데이터 흐름
 
@@ -40,23 +55,25 @@
    `_declutter_label_levels`를 그대로 재사용해 마커별 세로 스택 단계(level)를
    구한다. 이 zoom 값은 실제 카카오맵이 표시할 줌과 정확히 같을 필요가 없는,
    라벨 간 픽셀 거리 추정용 내부 근사치일 뿐이다.
-3. 마커 레코드 목록(`lat`, `lon`, `label`, `offset_level`), 강조 좌표
-   (`highlight_lat`/`highlight_lon`), `enable_selection` 여부, 카카오 JS 키를
-   컴포넌트 인자로 전달한다.
-4. `index.html`:
+3. 마커 레코드 목록(`lat`, `lon`, `label`, `offsetLevel`), 강조 좌표
+   (`highlight`), `enableSelection` 여부, 카카오 JS 키를 `data=` 딕셔너리로
+   컴포넌트에 전달한다.
+4. `script.js`의 `export default function(component)`:
    - `https://dapi.kakao.com/v2/maps/sdk.js?appkey=...&autoload=false` 로 SDK를
-     동적 로드.
+     동적 로드(모듈 스코프에 로드 Promise를 캐시해 컴포넌트 인스턴스가 여러 개여도
+     한 번만 로드).
    - 지점이 2개 이상이면 `kakao.maps.LatLngBounds`로 자동 범위 맞춤, 1개면 건물
      단위 확대 레벨(레벨 3 고정)로 표시.
    - 기존과 동일한 빨간 핀 SVG를 `kakao.maps.MarkerImage`/`Marker`로, 주소
-     라벨은 흰 배경 `kakao.maps.CustomOverlay`로 그리며 `offset_level`만큼
+     라벨은 흰 배경 `kakao.maps.CustomOverlay`로 그리며 `offsetLevel`만큼
      세로로 밀어 배치(픽셀 단위 CSS transform).
    - 강조 좌표가 있으면 고정 픽셀 크기의 노란 반투명 원을 `CustomOverlay`로 표시.
-   - `enable_selection=true`면 각 마커 클릭 시
-     `Streamlit.setComponentValue({"주소": ..., "lat": ..., "lon": ...})`
+   - `enableSelection=true`면 각 마커 클릭 시
+     `setTriggerValue("selected", {"주소": ..., "lat": ..., "lon": ...})`
      형태(기존 pydeck 선택 결과와 동일한 키)로 값을 돌려보낸다.
-5. 파이썬 래퍼 함수의 반환값은 기존과 동일한 dict/None이라, 지도 업로드 탭에서
-   `selected.get("lat")` 등을 쓰는 다운스트림 코드는 수정 없이 그대로 동작한다.
+5. 파이썬 래퍼 함수의 반환값은 기존과 동일한 dict/None이라(`result.selected`),
+   지도 업로드 탭에서 `selected.get("lat")` 등을 쓰는 다운스트림 코드는 수정
+   없이 그대로 동작한다.
 
 ## 에러 처리
 
@@ -70,11 +87,14 @@
 
 - 이 프로젝트에는 자동화 테스트가 없다 (확인됨: `test_*` 패턴/`pytest`/`unittest`
   사용 없음).
-- 로컬에서 `streamlit run dashboard.py`로 실행해 파이썬 예외 없이 5개 호출부
-  모두 렌더링되는지 확인한다.
-- 가능하면 Playwright로 브라우저 콘솔 에러 유무와 컴포넌트 마운트(iframe 로드)
-  여부를 점검한다. 다만 실제 카카오 타일이 정상 표시되는지는 사용자의 키/도메인
-  설정이 유효해야 최종 확인 가능하므로, 배포 후 최종 확인은 사용자가 직접 한다.
+- 로컬에서 `streamlit run dashboard.py`로 실행해 파이썬 예외 없이 4개 호출부
+  모두 렌더링되는지 확인했다.
+- Playwright로 실제 검증 완료: 가짜 JS 키로 지도 업로드 탭에 CSV를 올렸을 때
+  컴포넌트가 섀도우 DOM에 마운트되고, `data.kakaoJsKey`가 정확히 전달되고,
+  (가짜 키라 SDK 로드가 실패하는) 에러가 컴포넌트 내부 에러 배너에 정확히
+  표시되는 것까지 확인했다. 브라우저 콘솔 에러/경고 0건.
+- 실제 카카오 타일 렌더링과 마커 클릭→표 강조 왕복은 유효한 키/도메인이 있어야
+  최종 확인 가능하므로, 배포 후 최종 확인은 사용자가 직접 한다.
 
 ## 범위 밖
 

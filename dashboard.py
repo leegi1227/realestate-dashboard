@@ -10,13 +10,11 @@ streamlit run dashboard.py
 http://localhost:8501 주소를 직접 열면 됩니다.
 """
 
-import base64
 import io
 import math
-import string
+import os
 
 import pandas as pd
-import pydeck as pdk
 import streamlit as st
 from PublicDataReader import BuildingLedger, TransactionPrice
 
@@ -30,10 +28,6 @@ from building_example import (
     analyze_old_buildings,
     analyze_price_history,
     analyze_seismic_risk,
-    build_executive_summary,
-    build_master_report,
-    combine_zoning_sources,
-    generate_master_pdf_report,
     generate_pdf_report,
     geocode_address_kakao,
     get_bdong_code_map,
@@ -41,21 +35,34 @@ from building_example import (
     get_dong_list,
     get_full_building_report,
     get_sigungu_list,
+    REB_COMMERCIAL_VACANCY_STATBL_IDS,
+    reb_current_quarter_id,
+    reb_quarter_ids_desc,
+    get_reb_vacancy_snapshot,
+    get_reb_vacancy_trend,
     resolve_dong_code,
     reverse_match_transactions,
     split_common_and_varying,
 )
 
 
-_PIN_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
-  <path d="M32 2C19 2 8 13 8 26c0 18 24 36 24 36s24-18 24-36C56 13 45 2 32 2z" fill="#DC2626" stroke="#FFFFFF" stroke-width="2"/>
-  <circle cx="32" cy="26" r="9" fill="#FFFFFF"/>
-</svg>"""
-_PIN_ICON_URL = "data:image/svg+xml;base64," + base64.b64encode(_PIN_SVG.encode("utf-8")).decode("ascii")
-# IconLayer는 각 행이 아이콘 정의(url/width/height/anchorY)를 담은 "icon_data" 컬럼을
-# 참조하는 방식이 pydeck 공식 예제 패턴이다. anchorY를 아이콘 높이와 같게 두면
-# 구글 지도 핀처럼 뾰족한 끝부분이 정확한 좌표를 가리키게 된다.
-_PIN_ICON_DATA = {"url": _PIN_ICON_URL, "width": 64, "height": 64, "anchorY": 64}
+# 카카오맵 JS SDK를 삽입하는 Custom Components v2 컴포넌트 (기존 pydeck 렌더링을 대체).
+# components.v1.declare_component(구 iframe+postMessage 프로토콜)는 이 Streamlit 버전에서
+# 최초 마운트 시 컴포넌트가 준비 신호를 보내도 렌더 이벤트를 받지 못하고 조용히 멈추는
+# 문제가 있었다(재현 확인 — 공식 트러블슈팅 문서에도 "가장 흔한 v1 실패 증상"으로 명시돼
+# 있음). v2(`st.components.v2.component`)는 iframe 없이 같은 페이지에 직접(섀도우 DOM)
+# 마운트되고 핸드셰이크가 필요 없어 이 문제가 없다.
+_kakao_map_dir = os.path.join(os.path.dirname(__file__), "kakao_map_component")
+with open(os.path.join(_kakao_map_dir, "template.html"), encoding="utf-8") as _f:
+    _kakao_map_html = _f.read()
+with open(os.path.join(_kakao_map_dir, "style.css"), encoding="utf-8") as _f:
+    _kakao_map_css = _f.read()
+with open(os.path.join(_kakao_map_dir, "script.js"), encoding="utf-8") as _f:
+    _kakao_map_js = _f.read()
+
+_kakao_map_component = st.components.v2.component(
+    "kakao_map", html=_kakao_map_html, css=_kakao_map_css, js=_kakao_map_js,
+)
 
 
 def _mercator_pixel(lat: float, lon: float, zoom: float):
@@ -101,66 +108,39 @@ def _declutter_label_levels(lats, lons, zoom, label_width_px=260, row_height_px=
     return levels
 
 
-def _vworld_basemap_style(vworld_key: str) -> dict:
-    """브이월드 배경지도(WMTS) 타일을 쓰는 MapLibre 스타일 JSON을 만든다.
-
-    무료 Carto 배경지도는 오픈스트리트맵 기반이라 지역에 따라 건물 정보가
-    누락돼 보일 수 있다. 브이월드는 국토지리정보원의 공식 지도라 한국 건물
-    표시가 더 정확하다. react-map-gl(Streamlit 내장)은 mapStyle에 URL뿐
-    아니라 스타일 JSON 객체도 그대로 받을 수 있어 별도 지도 서비스 키(Mapbox 등)
-    없이도 커스텀 래스터 타일을 배경지도로 쓸 수 있다.
-    """
-    tile_url = f"https://api.vworld.kr/req/wmts/1.0.0/{vworld_key}/Base/{{z}}/{{y}}/{{x}}.png"
-    return {
-        "version": 8,
-        "sources": {
-            "vworld-base": {
-                "type": "raster",
-                "tiles": [tile_url],
-                "tileSize": 256,
-                "minzoom": 5,
-                "maxzoom": 19,
-                "attribution": "© VWorld",
-            }
-        },
-        "layers": [{"id": "vworld-base-layer", "type": "raster", "source": "vworld-base"}],
-    }
-
-
 def render_address_map(
     df: pd.DataFrame,
     lat_col: str = "lat",
     lon_col: str = "lon",
     label_col: str = None,
     show_labels: bool = True,
-    vworld_key: str = None,
+    kakao_js_key: str = None,
     enable_selection: bool = False,
     selection_key: str = None,
     highlight_lat: float = None,
     highlight_lon: float = None,
 ):
-    """지점을 구글 지도 스타일 핀으로 표시하고, show_labels=True면 핀 옆에 주소도 표시하는
+    """지점을 구글 지도 스타일 핀으로 카카오맵 위에 표시하고, show_labels=True면 핀 옆에
 
-    pydeck 지도. show_labels=False면 마커만 표시해 지점이 아주 많을 때 더 깔끔하게 볼 수 있다.
-    vworld_key가 있으면 배경지도를 무료 Carto(오픈스트리트맵 기반, 건물 누락 지역 있음)
-    대신 브이월드 공식 지도로 바꾼다.
+    주소도 표시한다. show_labels=False면 마커만 표시해 지점이 아주 많을 때 더 깔끔하게
+    볼 수 있다. kakao_js_key가 없으면 지도를 그리지 않고 안내 문구만 보여준다.
 
-    참고: 이전에는 radius_units="pixels"처럼 리터럴 문자열을 따옴표 없이 넘겨서
-    pydeck이 이를 "@@=pixels"라는 (정의되지 않은 변수를 참조하는) JS 표현식으로
-    잘못 직렬화하는 버그 때문에 아이콘/텍스트 레이어가 모두 깨졌었다. 리터럴
-    문자열 값은 파이썬 문자열 안에 따옴표를 한 번 더 감싸서(예: '"start"')
-    넘겨야 pydeck이 accessor가 아닌 고정값으로 취급한다.
+    실제 렌더링은 kakao_map_component/index.html(카카오맵 JS SDK를 삽입한 커스텀
+    Streamlit 컴포넌트)이 담당한다 — 이 함수는 파이썬 쪽에서 라벨 중복 제거, 겹침
+    방지용 세로 스택 단계 계산까지만 하고 나머지는 컴포넌트에 데이터로 넘긴다.
 
     enable_selection=True면 마커 클릭을 감지해서, 클릭된 지점의 데이터(주소/lat/lon이
-    담긴 dict)를 반환한다(클릭이 없으면 None). st.pydeck_chart의 on_select 기능은
-    선택 상태를 유지하려면 레이어에 고유 id가 있어야 해서, 이 함수는 항상 레이어에
-    id를 붙인다 — enable_selection=False일 때도 id 자체는 무해하다.
+    담긴 dict)를 반환한다(클릭이 없으면 None).
 
     highlight_lat/highlight_lon을 넘기면(예: 표에서 행을 선택했을 때) 그 좌표에 노란
-    테두리 원(halo)을 마커 밑에 깔아서 "이 마커가 지금 선택된 지점"임을 시각적으로
-    표시한다. 표 → 지도 방향 강조(이 옵션)와 지도 → 표 방향 강조(enable_selection)는
-    서로 독립적으로 켤 수 있다.
+    테두리 원(halo)을 표시해 "이 마커가 지금 선택된 지점"임을 시각적으로 나타낸다.
+    표 → 지도 방향 강조(이 옵션)와 지도 → 표 방향 강조(enable_selection)는 서로
+    독립적으로 켤 수 있다.
     """
+    if not kakao_js_key:
+        st.caption("카카오맵 JavaScript 키를 입력하면 지도를 표시합니다.")
+        return None
+
     plot_df = df.copy()
     if label_col and label_col in plot_df.columns:
         plot_df["주소"] = plot_df[label_col].astype(str)
@@ -181,102 +161,45 @@ def render_address_map(
     ]
     plot_df = plot_df.drop(columns=["_dedup_key"])
 
-    plot_df["icon_data"] = [_PIN_ICON_DATA] * len(plot_df)
-
-    lat_min, lat_max = float(plot_df[lat_col].min()), float(plot_df[lat_col].max())
-    lon_min, lon_max = float(plot_df[lon_col].min()), float(plot_df[lon_col].max())
-    center_lat, center_lon = (lat_min + lat_max) / 2, (lon_min + lon_max) / 2
     if len(plot_df) <= 1:
         zoom = 17
     else:
+        lat_span = plot_df[lat_col].max() - plot_df[lat_col].min()
+        lon_span = plot_df[lon_col].max() - plot_df[lon_col].min()
         # 여백 없이 딱 맞추면 가장자리 지점이 화면 밖으로 잘릴 수 있어 80% 여유를 둔다.
-        zoom = _fit_zoom((lat_max - lat_min) * 1.8, (lon_max - lon_min) * 1.8)
-    view_state = pdk.ViewState(
-        latitude=center_lat,
-        longitude=center_lon,
-        zoom=zoom,
-    )
-    _levels = _declutter_label_levels(plot_df[lat_col].tolist(), plot_df[lon_col].tolist(), zoom)
-    plot_df["label_offset"] = [[12, -24 - lvl * 18] for lvl in _levels]
-    icon_layer = pdk.Layer(
-        "IconLayer",
-        id="markers",
-        data=plot_df,
-        get_icon="icon_data",
-        get_position=f"[{lon_col}, {lat_col}]",
-        get_size=4,
-        size_scale=10,
-        pickable=True,
-    )
-    # TextLayer는 기본적으로 아스키 문자만 폰트 아틀라스에 포함시켜서, 한글처럼
-    # 기본 문자셋 밖의 글자는 조용히 안 그려진다(주소 뒷자리 번지 숫자만 보이던 원인).
-    # 실제 라벨에 쓰이는 문자를 모아 character_set으로 명시해야 한글이 제대로 나온다.
-    # 문자열 하나로(리스트가 아니라) 넘겨야 pydeck이 컬럼 접근자로 착각하지 않는다.
-    _address_chars = "".join(sorted(set("".join(plot_df["주소"].astype(str))))) + string.printable
-    text_layer = pdk.Layer(
-        "TextLayer",
-        id="labels",
-        data=plot_df,
-        get_position=f"[{lon_col}, {lat_col}]",
-        get_text="주소",
-        get_size=13,
-        get_color=[30, 30, 30, 255],
-        get_pixel_offset="label_offset",
-        get_text_anchor='"start"',
-        get_alignment_baseline='"center"',
-        character_set='"' + _address_chars.replace('"', "") + '"',
-        background=True,
-        get_background_color=[255, 255, 255, 220],
-        pickable=False,
-    )
-    tooltip = {"html": "<b>{주소}</b>", "style": {"backgroundColor": "white", "color": "black"}}
-    layers = [icon_layer, text_layer] if show_labels else [icon_layer]
+        # (이 zoom 값은 실제 카카오맵 줌과 정확히 같을 필요 없는, 라벨 간 픽셀 거리를
+        # 추정하기 위한 내부 근사치일 뿐 — 실제 화면 범위는 컴포넌트가 LatLngBounds로
+        # 자동으로 맞춘다.)
+        zoom = _fit_zoom(lat_span * 1.8, lon_span * 1.8)
+    levels = _declutter_label_levels(plot_df[lat_col].tolist(), plot_df[lon_col].tolist(), zoom)
+
+    markers = [
+        {"lat": float(row[lat_col]), "lon": float(row[lon_col]), "label": row["주소"], "offsetLevel": level}
+        for (_, row), level in zip(plot_df.iterrows(), levels)
+    ]
+    highlight = None
     if highlight_lat is not None and highlight_lon is not None:
-        halo_df = pd.DataFrame({lat_col: [highlight_lat], lon_col: [highlight_lon]})
-        halo_layer = pdk.Layer(
-            "ScatterplotLayer",
-            id="halo",
-            data=halo_df,
-            get_position=f"[{lon_col}, {lat_col}]",
-            get_fill_color=[255, 214, 0, 110],
-            get_line_color=[255, 170, 0, 255],
-            get_radius=28,
-            radius_units='"pixels"',
-            stroked=True,
-            line_width_min_pixels=3,
-            pickable=False,
-        )
-        layers = [halo_layer] + layers
-    if vworld_key:
-        # pydeck은 map_style을 dict로 주면 map_provider가 'mapbox'여야 한다고 자체 검증한다
-        # (Mapbox 전용 기능이라 가정하기 때문). 실제로는 Mapbox 토큰 없이 우리 스타일
-        # JSON(브이월드 래스터 타일)을 그대로 쓸 것이므로, 검증만 통과시킨 뒤 provider를
-        # maplibre로 바꿔서 Mapbox 관련 토큰 요구 로직을 타지 않게 한다.
-        deck = pdk.Deck(
-            layers=layers, initial_view_state=view_state, tooltip=tooltip,
-            map_provider="mapbox", map_style=_vworld_basemap_style(vworld_key),
-        )
-        deck.map_provider = "maplibre"
-        # Streamlit 프론트엔드가 mapStyle에 .indexOf()를 호출해서(문자열/배열 전제) 카르토
-        # 키 필요 여부를 판단한다 — 순수 객체를 그대로 넘기면 "indexOf is not a function"
-        # 에러가 난다(콘솔에서 확인). 배열로 감싸면 .indexOf도 되고, 실제 사용되는
-        # mapStyle[0] 값도 우리 스타일 객체 그대로 유지된다.
-        deck.map_style = [deck.map_style]
-    else:
-        deck = pdk.Deck(
-            layers=layers, initial_view_state=view_state, tooltip=tooltip,
-            map_style=None,  # Streamlit 테마 기본 지도 스타일 사용 (Carto/Mapbox 키 불필요)
-        )
+        highlight = {"lat": float(highlight_lat), "lon": float(highlight_lon)}
 
-    if not enable_selection:
-        st.pydeck_chart(deck)
-        return None
+    component_kwargs = {}
+    if enable_selection:
+        # 트리거 값("selected")은 대응하는 on_selected_change 콜백을 넘겨야만
+        # 결과 객체에 노출된다 — 실제로 콜백을 쓸 필요는 없어 빈 함수를 넘긴다.
+        component_kwargs["on_selected_change"] = lambda: None
 
-    event = st.pydeck_chart(
-        deck, on_select="rerun", selection_mode="single-object", key=selection_key,
+    result = _kakao_map_component(
+        key=selection_key,
+        data={
+            "kakaoJsKey": kakao_js_key,
+            "markers": markers,
+            "highlight": highlight,
+            "showLabels": show_labels,
+            "enableSelection": enable_selection,
+        },
+        height=460,
+        **component_kwargs,
     )
-    selected_objects = event.selection.get("objects", {}).get("markers", []) if event else []
-    return selected_objects[0] if selected_objects else None
+    return result.selected if enable_selection else None
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -330,26 +253,37 @@ with st.sidebar:
         st.caption(_len_note)
         service_key = _key_stripped
 
-    vworld_key = st.text_input(
-        "브이월드(V-World) 인증키 (선택)",
-        value="",
-        type="password",
-        placeholder="용도지역/지구 상세 정보를 원하면 입력 (없어도 나머지 기능은 정상 동작)",
-        help="https://www.vworld.kr 에서 발급. 통합 리포트의 용도지역/지구 상세 조회에만 쓰입니다. "
-             "(주소 좌표 조회는 더 이상 이 키를 쓰지 않습니다 — 아래 카카오 키 참고)",
-    )
-    vworld_key = vworld_key.strip() if vworld_key else None
-
     kakao_key = st.text_input(
         "카카오맵 REST API 키 (선택)",
         value="",
         type="password",
-        placeholder="주소 좌표(위도/경도) 조회·지도 표시에 사용",
+        placeholder="주소 좌표(위도/경도) 조회에 사용",
         help="https://developers.kakao.com 에서 앱 생성 후 'REST API 키'를 복사 (JavaScript 키 아님). "
              "브이월드 지오코딩은 해외 클라우드 배포 환경에서 정책적으로 차단돼(공간정보관리법 제16조) "
              "이 앱의 좌표 조회 기능은 전부 카카오로 전환했습니다.",
     )
     kakao_key = kakao_key.strip() if kakao_key else None
+
+    kakao_js_key = st.text_input(
+        "카카오맵 JavaScript 키 (선택)",
+        value="",
+        type="password",
+        placeholder="지도 화면 표시에 사용 (REST API 키와 다른 값)",
+        help="https://developers.kakao.com 앱 설정의 'JavaScript 키'. 위 REST API 키와는 "
+             "다른 값이며, 이 키를 쓰려면 카카오 개발자 콘솔의 '플랫폼 > Web'에 이 앱이 "
+             "배포된 도메인을 등록해야 지도가 표시됩니다.",
+    )
+    kakao_js_key = kakao_js_key.strip() if kakao_js_key else None
+
+    reb_key = st.text_input(
+        "한국부동산원 인증키 (선택)",
+        value="",
+        type="password",
+        placeholder="상업용부동산 공실률 조회에 사용",
+        help="https://www.reb.or.kr/r-one (R-ONE 부동산통계정보시스템)에 로그인 후 "
+             "'Open API > 인증키 발급내역'에서 발급. '🏬 상업용부동산 공실률' 탭에서만 쓰입니다.",
+    )
+    reb_key = reb_key.strip() if reb_key else None
 
     address = st.text_input("주소 (시/군/구 + 동)", value="성남시 분당구 백현동",
                              help="코드를 몰라도 동 이름으로 자동 검색됩니다.")
@@ -370,184 +304,11 @@ def _resolve_codes():
     return sigungu_code, bdong_code, row["시도명"], row["시군구명"]
 
 
-tab_master, tab_single, tab_report, tab_price, tab_district, tab_old, tab_seismic, tab_priceh, tab_map, tab_geocode = st.tabs([
-    "🏆 통합 리포트", "🔍 단일 조회", "📋 종합 리포트", "💰 실거래가",
+tab_single, tab_report, tab_price, tab_district, tab_old, tab_seismic, tab_priceh, tab_map, tab_geocode, tab_commercial = st.tabs([
+    "🔍 단일 조회", "📋 종합 리포트", "💰 실거래가",
     "📊 동단위 통계", "🏚️ 노후건축물", "🧱 내진 취약 스캔", "💹 공시가격 시계열", "🗺️ 지도 업로드",
-    "📍 지오코딩",
+    "📍 지오코딩", "🏬 상업용부동산 공실률",
 ])
-
-# ------------------------------------------------------------------
-# 탭 0: 통합 리포트 — 단일조회+실거래가+동단위통계+노후건축물+내진+공시가격을 한 번에
-# ------------------------------------------------------------------
-with tab_master:
-    st.write("사이드바에 입력한 주소·번지 하나로, 단일조회·실거래가·노후도·내진·공시가격을 한 번에 모읍니다.")
-    months_lookback = st.slider("실거래가 조회 기간 (개월)", 3, 36, 12, key="master_months")
-    with_district = st.checkbox(
-        "동네 평균과 비교하기 (동 전체를 받아야 해서 최초 조회 시 20~40초 걸릴 수 있음)",
-        value=False, key="master_with_district",
-    )
-
-    if st.button("통합 리포트 생성", type="primary", key="master_submit"):
-        if not service_key:
-            st.error("서비스키를 입력해주세요.")
-        else:
-            api = BuildingLedger(service_key)
-            tp_api = TransactionPrice(service_key)
-            try:
-                with st.spinner("주소를 코드로 변환하는 중..."):
-                    sigungu_code, bdong_code, addr_sido, addr_sigungu_name = _resolve_codes()
-
-                district_title_df = None
-                if with_district:
-                    with st.spinner("동 전체 표제부 수집 중... (캐시되어 있으면 즉시 완료)"):
-                        district_title_df = _load_district_titles(service_key, sigungu_code, bdong_code)
-
-                with st.spinner("단일조회·실거래가·노후도·내진·공시가격 종합 중..."):
-                    master = build_master_report(
-                        api, tp_api, sigungu_code, bdong_code,
-                        bun=bun or None, ji=ji if ji and ji != "0" else None,
-                        months_lookback=months_lookback,
-                        district_title_df=district_title_df,
-                        sido=addr_sido, sigungu_name=addr_sigungu_name,
-                        vworld_key=vworld_key, kakao_key=kakao_key,
-                    )
-                st.session_state.master = master
-                st.session_state.master_address_label = address
-            except Exception as e:
-                st.error(f"리포트 생성 실패: {e}")
-                st.session_state.master = None
-
-    master = st.session_state.get("master")
-    if not master:
-        st.info("**통합 리포트 생성** 버튼을 눌러주세요.")
-    else:
-        title_df = master.get("표제부")
-        core = title_df.iloc[0] if title_df is not None and not title_df.empty else None
-
-        st.subheader("📝 핵심 요약")
-        st.info(build_executive_summary(master))
-
-        st.divider()
-        if core is not None:
-            st.subheader("① 단일 조회 — 핵심 정보")
-            addr = core.get("도로명대지위치") or core.get("대지위치", "")
-            st.markdown(f"**{addr}** · {core.get('건물명', '') or '(건물명 없음)'}")
-            zoning = combine_zoning_sources(master)
-            if zoning:
-                st.markdown(f"**용도지역/지구**: {', '.join(zoning)}")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("주용도", core.get("주용도코드명", "-"))
-            c2.metric("구조", core.get("구조코드명", "-"))
-            c3.metric("지상/지하층수", f"{core.get('지상층수', '-')} / {core.get('지하층수', '-')}")
-            c4.metric("사용승인일", str(core.get("사용승인일", "-")))
-            c5, c6, c7, c8 = st.columns(4)
-            c5.metric("대지면적(㎡)", core.get("대지면적", "-"))
-            c6.metric("연면적(㎡)", core.get("연면적", "-"))
-            c7.metric("건폐율(%)", core.get("건폐율", "-"))
-            c8.metric("용적률(%)", core.get("용적률", "-"))
-
-            coord = master.get("좌표")
-            if coord:
-                render_address_map(
-                    pd.DataFrame({"lat": [coord[1]], "lon": [coord[0]], "주소": [addr]}),
-                    label_col="주소", vworld_key=vworld_key,
-                )
-            elif kakao_key:
-                st.caption("좌표를 확인하지 못해 지도를 표시할 수 없습니다.")
-            else:
-                st.caption("카카오맵 REST API 키를 입력하면 이 위치를 지도에 표시합니다.")
-        else:
-            st.warning("표제부 조회 결과가 없습니다 — 주소/번지를 확인해주세요.")
-
-        st.divider()
-        st.subheader("② 실거래가")
-        tx = master.get("실거래가") or {}
-        tx_df = tx.get("df")
-        st.caption(f"추정 부동산 유형: {master.get('추정부동산유형') or '판별 불가'}")
-        st.write(tx.get("note", ""))
-        if tx_df is not None and not tx_df.empty and "거래금액" in tx_df.columns:
-            if tx.get("status") != "matched":
-                prices = pd.to_numeric(tx_df["거래금액"], errors="coerce").dropna()
-                if not prices.empty:
-                    p1, p2, p3, p4 = st.columns(4)
-                    p1.metric("참고 거래건수", f"{len(prices):,}")
-                    p2.metric("평균가(억)", f"{prices.mean()/1e4:.1f}")
-                    p3.metric("중앙값(억)", f"{prices.median()/1e4:.1f}")
-                    p4.metric("최저~최고(억)", f"{prices.min()/1e4:.1f} ~ {prices.max()/1e4:.1f}")
-                st.caption("아래는 이 번지와 정확히 일치하지 않는, 인근 참고 거래 목록입니다.")
-                st.dataframe(tx_df.head(20), width='stretch')
-            else:
-                st.dataframe(tx_df, width='stretch')
-
-        st.divider()
-        st.subheader("③ 노후도 · 내진")
-        old_df = master.get("노후도")
-        seismic = master.get("내진분석") or {}
-        seismic_list = seismic.get("취약우선목록")
-        c5, c6 = st.columns(2)
-        if old_df is not None and not old_df.empty and "경과연수" in old_df.columns:
-            c5.metric("경과연수", f"{old_df.iloc[0]['경과연수']:.0f}년")
-        else:
-            c5.metric("경과연수", "-")
-        if seismic_list is not None and not seismic_list.empty:
-            c6.metric("내진 분류", seismic_list.iloc[0].get("내진분류", "-"))
-        else:
-            c6.metric("내진 분류", "-")
-
-        st.divider()
-        st.subheader("④ 공시가격(시가표준액) 시계열")
-        ph = master.get("공시가격") or {}
-        units = ph.get("단위목록") or []
-        if not units:
-            st.info("이 번지의 공시가격(주택가격) 데이터가 없습니다.")
-        else:
-            st.warning(ph.get("경고", ""))
-            summary_df = pd.DataFrame([
-                {
-                    "호(PK)": str(u["관리건축물대장PK"])[-6:],
-                    "최초연도": u["최초연도"], "최초가격(억)": round(u["최초가격"] / 1e8, 2),
-                    "최신연도": u["최신연도"], "최신가격(억)": round(u["최신가격"] / 1e8, 2),
-                    "총증감(%)": u["총증감률(%)"], "CAGR(%)": u["연평균상승률CAGR(%)"],
-                }
-                for u in units
-            ])
-            st.dataframe(summary_df, width='stretch')
-            st.caption(f"최고가 호(…{str(units[0]['관리건축물대장PK'])[-6:]}) 연도별 추이")
-            st.line_chart(units[0]["추이"].set_index("연도"))
-
-        district = master.get("동단위통계")
-        if district and district.get("총괄"):
-            st.divider()
-            st.subheader("⑤ 동단위 통계 비교")
-            s = district["총괄"]
-            d1, d2, d3, d4 = st.columns(4)
-            d1.metric("동 전체 총동수", f"{s['총동수']:,}")
-            d2.metric("동 총연면적(㎡)", f"{s['총연면적(㎡)']:,.0f}")
-            d3.metric("동 평균 층수", s["평균층수"])
-            d4.metric("동 평균 경과연수", f"{s['평균경과연수']}년")
-            if old_df is not None and not old_df.empty and "경과연수" in old_df.columns and s.get("평균경과연수"):
-                diff = old_df.iloc[0]["경과연수"] - s["평균경과연수"]
-                st.caption(f"이 건물은 동 평균보다 {abs(diff):.1f}년 {'더 오래됨' if diff > 0 else '더 신축'}")
-
-            col_p, col_a = st.columns(2)
-            if district.get("주용도별") is not None and not district["주용도별"].empty:
-                col_p.markdown("**주용도별 분포 (상위 5)**")
-                col_p.dataframe(district["주용도별"].head(5), width='stretch')
-            if district.get("노후도분포") is not None and not district["노후도분포"].empty:
-                col_a.markdown("**노후도 분포**")
-                col_a.dataframe(district["노후도분포"], width='stretch')
-
-        st.divider()
-        try:
-            pdf_bytes = generate_master_pdf_report(
-                master, address_label=st.session_state.get("master_address_label", "")
-            )
-            st.download_button(
-                "📄 통합 리포트 PDF 다운로드", pdf_bytes, "master_report.pdf", "application/pdf",
-                type="primary", key="master_pdf",
-            )
-        except Exception as e:
-            st.error(f"PDF 생성 실패: {e}")
 
 # ------------------------------------------------------------------
 # 탭 1: 단일 대장 종류 조회
@@ -888,7 +649,7 @@ with tab_price:
             if not map_df.empty:
                 st.subheader("🗺️ 거래 위치 지도")
                 st.caption(f"좌표가 확인된 {len(map_df)}/{len(tp_df)}건을 표시합니다.")
-                render_address_map(map_df, lat_col="위도", lon_col="경도", label_col="주소", vworld_key=vworld_key)
+                render_address_map(map_df, lat_col="위도", lon_col="경도", label_col="주소", kakao_js_key=kakao_js_key)
 
 # ------------------------------------------------------------------
 # 탭 4: 동단위 통계
@@ -1104,7 +865,7 @@ with tab_map:
 
                 selected = render_address_map(
                     plot_df, label_col="주소" if addr_col else None,
-                    show_labels=show_labels, vworld_key=vworld_key,
+                    show_labels=show_labels, kakao_js_key=kakao_js_key,
                     enable_selection=True, selection_key="map_upload_selection",
                     highlight_lat=highlight_lat, highlight_lon=highlight_lon,
                 )
@@ -1175,7 +936,7 @@ with tab_geocode:
                 c2.metric("위도 (lat)", f"{lat:.6f}")
                 render_address_map(
                     pd.DataFrame({"lat": [lat], "lon": [lon], "주소": [found_addr]}),
-                    label_col="주소", vworld_key=vworld_key,
+                    label_col="주소", kakao_js_key=kakao_js_key,
                 )
             else:
                 st.error(f"좌표를 찾지 못했습니다 ({reason}). 주소를 다시 확인해주세요.")
@@ -1230,4 +991,88 @@ with tab_geocode:
             )
             map_df = batch_result.dropna(subset=["위도", "경도"])
             if not map_df.empty:
-                render_address_map(map_df, lat_col="위도", lon_col="경도", label_col="주소", vworld_key=vworld_key)
+                render_address_map(map_df, lat_col="위도", lon_col="경도", label_col="주소", kakao_js_key=kakao_js_key)
+
+# ------------------------------------------------------------------
+# 탭 10: 상업용부동산 공실률 (한국부동산원 R-ONE Open API)
+# ------------------------------------------------------------------
+with tab_commercial:
+    st.write("한국부동산원 상업용부동산 임대동향조사의 상권별 공실률을 조회합니다. "
+             "(상권 재구획 이후인 2024년 3분기~ 데이터만 제공합니다.)")
+    if not reb_key:
+        st.warning("사이드바에 한국부동산원 인증키를 입력해야 사용할 수 있습니다.")
+    else:
+        def _fmt_quarter(q):
+            return f"{q[:4]}년 {int(q[4:6])}분기"
+
+        c1, c2 = st.columns(2)
+        commercial_type = c1.selectbox("부동산 유형", list(REB_COMMERCIAL_VACANCY_STATBL_IDS.keys()))
+        latest_quarter = reb_current_quarter_id()
+        quarter_options = reb_quarter_ids_desc("202403", latest_quarter)
+        selected_quarter = c2.selectbox("분기", quarter_options, format_func=_fmt_quarter)
+
+        if st.button("공실률 조회", type="primary", key="commercial_submit"):
+            statbl_id = REB_COMMERCIAL_VACANCY_STATBL_IDS[commercial_type]
+            try:
+                with st.spinner("조회 중..."):
+                    snap_df, used_quarter, snap_message = get_reb_vacancy_snapshot(reb_key, statbl_id, selected_quarter)
+            except RuntimeError as e:
+                st.error(str(e))
+                snap_df, used_quarter, snap_message = pd.DataFrame(), selected_quarter, None
+
+            st.session_state.commercial_snapshot = snap_df
+            st.session_state.commercial_snapshot_meta = (commercial_type, statbl_id, used_quarter, snap_message)
+
+        snap_df = st.session_state.get("commercial_snapshot")
+        meta = st.session_state.get("commercial_snapshot_meta")
+
+        if snap_df is not None and meta is not None:
+            commercial_type, statbl_id, used_quarter, snap_message = meta
+            if snap_df.empty:
+                st.info(snap_message or f"{_fmt_quarter(used_quarter)} 데이터가 없습니다. 다른 분기를 선택해보세요.")
+            else:
+                if used_quarter != selected_quarter:
+                    st.caption(f"선택하신 분기는 아직 데이터가 없어 {_fmt_quarter(used_quarter)} 결과를 표시합니다.")
+
+                display_df = snap_df[["CLS_FULLNM", "DTA_VAL"]].rename(
+                    columns={"CLS_FULLNM": "상권", "DTA_VAL": "공실률(%)"}
+                )
+                display_df["공실률(%)"] = pd.to_numeric(display_df["공실률(%)"], errors="coerce").round(2)
+                display_df = display_df.sort_values("공실률(%)", ascending=False).reset_index(drop=True)
+
+                search = st.text_input("상권 검색 (예: 연남, 강남, 판교)", key="commercial_search")
+                if search.strip():
+                    display_df = display_df[display_df["상권"].str.contains(search.strip(), case=False, na=False)]
+
+                st.caption(f"{commercial_type} · {_fmt_quarter(used_quarter)} · {len(display_df)}개 상권 "
+                           "— 행을 클릭하면 아래에 분기별 추이가 표시됩니다.")
+                event = st.dataframe(
+                    display_df, width='stretch', hide_index=True,
+                    on_select="rerun", selection_mode="single-row", key="commercial_table_select",
+                )
+                selected_rows = event.selection.get("rows", []) if event else []
+                if selected_rows:
+                    picked_addr = display_df.iloc[selected_rows[0]]["상권"]
+                    cls_id = snap_df.loc[snap_df["CLS_FULLNM"] == picked_addr, "CLS_ID"].iloc[0]
+
+                    try:
+                        with st.spinner("추이 조회 중..."):
+                            trend_df, trend_message = get_reb_vacancy_trend(
+                                reb_key, statbl_id, cls_id, "202403", latest_quarter,
+                            )
+                    except RuntimeError as e:
+                        st.error(str(e))
+                        trend_df = pd.DataFrame()
+
+                    st.subheader(f"📈 {picked_addr} 공실률 추이")
+                    if trend_df.empty:
+                        st.info(trend_message or "추이 데이터가 없습니다.")
+                    else:
+                        trend_df = trend_df.copy()
+                        trend_df["공실률(%)"] = pd.to_numeric(trend_df["DTA_VAL"], errors="coerce")
+                        trend_df = trend_df.sort_values("WRTTIME_IDTFR_ID")
+                        x_label_col = "WRTTIME_DESC" if "WRTTIME_DESC" in trend_df.columns else "WRTTIME_IDTFR_ID"
+                        if x_label_col == "WRTTIME_IDTFR_ID":
+                            trend_df[x_label_col] = trend_df[x_label_col].map(_fmt_quarter)
+                        chart_df = trend_df.set_index(x_label_col)[["공실률(%)"]]
+                        st.line_chart(chart_df)
