@@ -160,3 +160,33 @@
 
 - 마커 클러스터링, 커스텀 지도 스킨/테마 등 기존에 없던 신규 기능은 추가하지 않는다.
 - REST API 지오코딩(`geocode_address_kakao`) 로직은 변경하지 않는다.
+
+## 추가 버그 수정 (다른 세션, 2026-07-29 이후)
+
+사용자가 실제 사용 중 지도가 아주 작게 찌그러지고(약 260×80px), 페이지 어딘가에
+관련 없는 축소된 지도 조각(다른 지역 지명)이 따로 떠 있는 현상을 보고했다.
+V-World 키 유무와 무관하게(더미 OSM 배경으로도) 재현됨 — 즉 타일 소스 문제가
+아니라 컴포넌트 자체의 문제였다.
+
+**원인**: `loadLeaflet()`가 `leaflet.css`를 `document.head`에 `<link>`로
+주입하고 있었는데, 이 컴포넌트는 `isolate_styles=True`(기본값)라 각 인스턴스가
+자기만의 **섀도 루트**에 마운트된다(Streamlit 번들 문서
+`ccv2-troubleshooting.md`의 "Shadow DOM / isolate_styles surprises" 항목에
+정확히 명시된 함정). `document.head`에 넣은 스타일시트는 섀도 DOM 경계를
+넘지 못해 `.leaflet-container` 등 필수 레이아웃 규칙이 지도 내부 엘리먼트에
+전혀 적용되지 않았다 — 그 결과로 크기가 찌그러진 것. "CSS 로드 타이밍" 문제로
+오인하기 쉽지만(실제로 먼저 그렇게 진단하고 JS/CSS 로드를 Promise.all로
+동기화하는 수정을 시도했으나 재현이 그대로였다), 진짜 원인은 애초에 CSS가
+적용될 수 없는 위치(전역 document)에 주입되고 있었다는 것이었다.
+
+**수정**: CSS는 `document.head`가 아니라 `component.parentElement`(컴포넌트별
+섀도 루트)에 인스턴스마다 주입하도록 변경(`ensureLeafletCss(root)`,
+`WeakSet`으로 이미 주입된 루트 추적). Leaflet JS 라이브러리(`window.L`)는
+섀도 DOM과 무관한 전역 객체라 기존처럼 페이지 전체가 공유해도 안전해서
+그대로 뒀다. 추가 안전장치로 `L.map()` 생성 다음 프레임에
+`map.invalidateSize()`를 호출하고, CSS에 `min-height`를 넣어 크기 계산이
+어떤 이유로든 실패해도 지도가 0으로 붕괴하지 않게 했다.
+
+Playwright로 재현 → 수정 → 재검증 완료: 지도 업로드 탭에서 지도가 전체
+크기로 정상 렌더링되고, 마커 클릭→표 강조·표 행 선택→지도 노란 원 표시
+양방향 상호작용 모두 콘솔 에러 없이 동작하는 것을 스크린샷으로 확인.

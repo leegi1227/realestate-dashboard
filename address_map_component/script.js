@@ -7,32 +7,63 @@ const PIN_IMAGE_URL = "data:image/svg+xml;base64," + btoa(PIN_SVG);
 const LEAFLET_CSS_URL = "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css";
 const LEAFLET_JS_URL = "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js";
 
-// 이 모듈은 address_map 컴포넌트의 모든 인스턴스(대시보드의 여러 탭)가 공유한다 —
-// Leaflet 로드는 앱 전체에서 한 번만 하면 되므로 모듈 스코프(함수 바깥)에 캐시한다.
-// 카카오맵과 달리 API 키/도메인 등록이 필요 없어(OpenStreetMap 무료 타일) 로드
-// 실패 가능성이 훨씬 낮다.
-let leafletLoadPromise = null;
+// Leaflet의 JS 라이브러리(window.L)는 페이지에 하나만 있으면 되는 전역이라
+// 모듈 스코프에 캐시해서 앱 전체(탭이 여러 개라 컴포넌트 인스턴스도 여러 개)가
+// 공유한다 — CSS와 달리 섀도 DOM 경계와 무관하게 그냥 전역 객체라 공유해도 된다.
+let leafletJsPromise = null;
 
-function loadLeaflet() {
-  if (leafletLoadPromise) return leafletLoadPromise;
-  leafletLoadPromise = new Promise((resolve, reject) => {
-    if (window.L) {
-      resolve(window.L);
+function loadLeafletJs() {
+  if (leafletJsPromise) return leafletJsPromise;
+  leafletJsPromise = window.L
+    ? Promise.resolve(window.L)
+    : new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = LEAFLET_JS_URL;
+        script.onload = () => resolve(window.L);
+        script.onerror = () => reject(new Error("Leaflet 스크립트를 불러오지 못했습니다 (네트워크 오류)"));
+        document.head.appendChild(script);
+      });
+  return leafletJsPromise;
+}
+
+// CSS는 JS와 달리 공유할 수 없다: CCv2 컴포넌트는 기본적으로(isolate_styles=True)
+// 각자 자기만의 섀도 루트에 마운트되고, document.head에 넣은 <link>/<style>은
+// 섀도 DOM 경계를 넘지 못해 그 안의 엘리먼트(.leaflet-container 등)에는 전혀
+// 적용되지 않는다 — 이게 바로 지도가 찌그러져 보이던 진짜 원인이었다(CSS 로드
+// "타이밍"이 아니라 애초에 적용될 수 없는 위치에 넣고 있었음: 브라우저는 계속
+// 정상적으로 CSS를 받아왔지만 그 CSS가 유효한 범위가 이 컴포넌트의 섀도 루트가
+// 아니었을 뿐). 그래서 CSS는 인스턴스별 섀도 루트(root)에 각각 주입해야 한다.
+const cssLoadedRoots = new WeakSet();
+
+function ensureLeafletCss(root) {
+  if (cssLoadedRoots.has(root)) return Promise.resolve();
+  return new Promise((resolve) => {
+    const existing = root.querySelector(`link[href="${LEAFLET_CSS_URL}"]`);
+    if (existing) {
+      cssLoadedRoots.add(root);
+      if (existing.sheet) {
+        resolve();
+      } else {
+        existing.addEventListener("load", () => resolve(), { once: true });
+        existing.addEventListener("error", () => resolve(), { once: true });
+      }
       return;
     }
-    if (!document.querySelector(`link[href="${LEAFLET_CSS_URL}"]`)) {
-      const link = document.createElement("link");
-      link.rel = "stylesheet";
-      link.href = LEAFLET_CSS_URL;
-      document.head.appendChild(link);
-    }
-    const script = document.createElement("script");
-    script.src = LEAFLET_JS_URL;
-    script.onload = () => resolve(window.L);
-    script.onerror = () => reject(new Error("Leaflet 스크립트를 불러오지 못했습니다 (네트워크 오류)"));
-    document.head.appendChild(script);
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = LEAFLET_CSS_URL;
+    link.onload = () => {
+      cssLoadedRoots.add(root);
+      resolve();
+    };
+    // CSS 로드 실패는 지도가 못생기게 나오는 정도지 기능이 죽는 건 아니므로,
+    // JS 로드 실패(showError로 이어짐)와 달리 그냥 resolve해서 진행시킨다.
+    link.onerror = () => {
+      cssLoadedRoots.add(root);
+      resolve();
+    };
+    root.appendChild(link);
   });
-  return leafletLoadPromise;
 }
 
 // 컴포넌트 인스턴스(mapEl)별로 마지막에 만든 Leaflet map과, 그걸 만들 때 쓴
@@ -121,6 +152,15 @@ function renderMap(L, mapEl, data, setTriggerValue) {
   }
 
   mapInstances.set(mapEl, map);
+
+  // Leaflet은 L.map() 실행 시점의 컨테이너 크기를 그대로 굳혀서 타일/줌 컨트롤을
+  // 배치한다 — 그 시점에 섀도우 DOM 레이아웃이나 CSS 적용이 아직 완전히
+  // 끝나지 않았으면(특히 컴포넌트가 막 마운트된 첫 렌더) 실제 최종 크기와 어긋난
+  // 채로 굳어버려 지도가 찌그러져 보일 수 있다. 다음 프레임에 실제 크기를 다시
+  // 재보게 강제해 이 어긋남을 스스로 바로잡는다 — 크기가 이미 맞았으면 아무
+  // 효과가 없는 안전한 호출이라 항상 걸어둔다.
+  requestAnimationFrame(() => map.invalidateSize());
+
   return map;
 }
 
@@ -140,8 +180,8 @@ export default function (component) {
     mapEl.style.display = "block";
   }
 
-  loadLeaflet()
-    .then((L) => {
+  Promise.all([loadLeafletJs(), ensureLeafletCss(parentElement)])
+    .then(([L]) => {
       clearError();
       renderMap(L, mapEl, data || {}, setTriggerValue);
     })
