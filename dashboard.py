@@ -40,6 +40,16 @@ from building_example import (
     reb_quarter_ids_desc,
     get_reb_vacancy_snapshot,
     get_reb_vacancy_trend,
+    get_nearby_stores,
+    load_sangkwon_upjong_codes,
+    get_seoul_trade_area_locations,
+    get_seoul_trade_area_quarter_dataset,
+    find_nearest_seoul_trade_area,
+    seoul_current_quarter_id,
+    SEOUL_TRDAR_SALES_SERVICE,
+    SEOUL_TRDAR_STORE_SERVICE,
+    SEOUL_TRDAR_FLPOP_SERVICE,
+    SEOUL_TRDAR_WRC_POPLTN_SERVICE,
     resolve_dong_code,
     reverse_match_transactions,
     split_common_and_varying,
@@ -243,6 +253,19 @@ def _load_district_titles(service_key: str, sigungu_code: str, bdong_code: str):
         wait_time=0.15,
     )
 
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def _load_seoul_trade_area_locations(seoul_key: str):
+    """서울시 전체 상권(약 1,650개) 위치 정보를 6시간 캐시 (매 요청마다 다시 받기엔 무겁다)."""
+    return get_seoul_trade_area_locations(seoul_key)
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def _load_seoul_quarter_dataset(seoul_key: str, service: str):
+    """서울시 상권분석서비스 분기 데이터(전역, 수만 건)를 6시간 캐시."""
+    return get_seoul_trade_area_quarter_dataset(seoul_key, service)
+
+
 st.set_page_config(page_title="건축물대장 조회", page_icon="🏢", layout="wide")
 
 st.title("🏢 국토교통부 건축물대장 조회")
@@ -299,6 +322,26 @@ with st.sidebar:
     )
     reb_key = reb_key.strip() if reb_key else None
 
+    sangkwon_key = st.text_input(
+        "소상공인시장진흥공단 인증키 (선택)",
+        value="",
+        type="password",
+        placeholder="주변 상가업소 조회에 사용. 미입력 시 위 공공데이터포털 서비스키로 자동 시도합니다.",
+        help="https://www.data.go.kr 에서 '소상공인시장진흥공단_상가(상권)정보_API'를 별도로 활용신청 후 승인되면, "
+             "위에 입력한 공공데이터포털 서비스키와 보통 같은 값입니다. '🏪 주변 상가업소' 탭에서만 쓰입니다.",
+    )
+    sangkwon_key = sangkwon_key.strip() if sangkwon_key else (service_key or None)
+
+    seoul_key = st.text_input(
+        "서울 열린데이터광장 인증키 (선택)",
+        value="",
+        type="password",
+        placeholder="서울시 우리마을가게 상권분석서비스(추정매출/생활인구 등)에 사용",
+        help="https://data.seoul.go.kr 에 로그인 후 '마이페이지 > 인증키 신청현황'에서 발급/확인. "
+             "서울시 소재 상권만 조회 가능합니다. '🏙️ 서울 상권분석' 탭에서만 쓰입니다.",
+    )
+    seoul_key = seoul_key.strip() if seoul_key else None
+
     address = st.text_input("주소 (시/군/구 + 동)", value="성남시 분당구 백현동",
                              help="코드를 몰라도 동 이름으로 자동 검색됩니다.")
 
@@ -318,10 +361,10 @@ def _resolve_codes():
     return sigungu_code, bdong_code, row["시도명"], row["시군구명"]
 
 
-tab_single, tab_report, tab_price, tab_district, tab_old, tab_seismic, tab_priceh, tab_map, tab_geocode, tab_commercial = st.tabs([
+tab_single, tab_report, tab_price, tab_district, tab_old, tab_seismic, tab_priceh, tab_map, tab_geocode, tab_commercial, tab_sangkwon, tab_seoul = st.tabs([
     "🔍 단일 조회", "📋 종합 리포트", "💰 실거래가",
     "📊 동단위 통계", "🏚️ 노후건축물", "🧱 내진 취약 스캔", "💹 공시가격 시계열", "🗺️ 지도 업로드",
-    "📍 지오코딩", "🏬 상업용부동산 공실률",
+    "📍 지오코딩", "🏬 상업용부동산 공실률", "🏪 주변 상가업소", "🏙️ 서울 상권분석",
 ])
 
 # ------------------------------------------------------------------
@@ -1090,3 +1133,249 @@ with tab_commercial:
                             trend_df[x_label_col] = trend_df[x_label_col].map(_fmt_quarter)
                         chart_df = trend_df.set_index(x_label_col)[["공실률(%)"]]
                         st.line_chart(chart_df)
+
+# ------------------------------------------------------------------
+# 탭 11: 주변 상가업소 (소상공인시장진흥공단 상가(상권)정보 Open API)
+# ------------------------------------------------------------------
+with tab_sangkwon:
+    st.write("**소상공인시장진흥공단 상가(상권)정보 Open API**로 특정 위치 반경 내 실제 점포(상가업소) 목록을 조회합니다. "
+             "임장·상권분석 시 주변 업종 구성을 파악하는 데 활용할 수 있습니다. (반경 최대 2,000m)")
+    if not sangkwon_key:
+        st.warning("사이드바에 소상공인시장진흥공단(또는 공공데이터포털) 인증키를 입력해야 사용할 수 있습니다.")
+    elif not kakao_key:
+        st.warning("사이드바에 카카오맵 REST API 키를 입력해야 주소를 좌표로 변환할 수 있습니다.")
+    else:
+        sk_addr = st.text_input(
+            "주소", placeholder="예: 서울특별시 마포구 연남동 227-1", key="sangkwon_addr",
+        )
+
+        upjong_df = load_sangkwon_upjong_codes()
+        c1, c2, c3, c4 = st.columns([2, 2, 2, 1])
+
+        lcls_pairs = upjong_df[["대분류코드", "대분류명"]].drop_duplicates().sort_values("대분류코드")
+        lcls_name = c1.selectbox("업종 대분류", ["(전체)"] + lcls_pairs["대분류명"].tolist(), key="sk_lcls")
+        lcls_cd = mcls_cd = scls_cd = None
+
+        if lcls_name != "(전체)":
+            lcls_cd = lcls_pairs.loc[lcls_pairs["대분류명"] == lcls_name, "대분류코드"].iloc[0]
+            mcls_pairs = (
+                upjong_df[upjong_df["대분류코드"] == lcls_cd][["중분류코드", "중분류명"]]
+                .drop_duplicates().sort_values("중분류코드")
+            )
+            mcls_name = c2.selectbox("업종 중분류", ["(전체)"] + mcls_pairs["중분류명"].tolist(), key="sk_mcls")
+            if mcls_name != "(전체)":
+                mcls_cd = mcls_pairs.loc[mcls_pairs["중분류명"] == mcls_name, "중분류코드"].iloc[0]
+                scls_pairs = (
+                    upjong_df[upjong_df["중분류코드"] == mcls_cd][["소분류코드", "소분류명"]]
+                    .drop_duplicates().sort_values("소분류코드")
+                )
+                scls_name = c3.selectbox("업종 소분류", ["(전체)"] + scls_pairs["소분류명"].tolist(), key="sk_scls")
+                if scls_name != "(전체)":
+                    scls_cd = scls_pairs.loc[scls_pairs["소분류명"] == scls_name, "소분류코드"].iloc[0]
+            else:
+                c3.selectbox("업종 소분류", ["(전체)"], key="sk_scls_disabled", disabled=True)
+        else:
+            c2.selectbox("업종 중분류", ["(전체)"], key="sk_mcls_disabled", disabled=True)
+            c3.selectbox("업종 소분류", ["(전체)"], key="sk_scls_disabled", disabled=True)
+
+        radius = c4.number_input("반경(m)", min_value=100, max_value=2000, value=500, step=100, key="sk_radius")
+
+        if st.button("주변 상가업소 조회", type="primary", key="sangkwon_submit"):
+            addr = sk_addr.strip()
+            if not addr:
+                st.warning("주소를 입력해주세요.")
+            else:
+                with st.spinner("주소 좌표 변환 중..."):
+                    coord, reason = geocode_address_kakao(kakao_key, addr)
+                if not coord:
+                    st.error(f"좌표를 찾지 못했습니다 ({reason}).")
+                    st.session_state.sangkwon_result = None
+                else:
+                    lon, lat = coord
+                    try:
+                        with st.spinner("주변 상가업소 조회 중..."):
+                            stores_df = get_nearby_stores(
+                                sangkwon_key, lon, lat, radius=int(radius),
+                                inds_lcls_cd=lcls_cd, inds_mcls_cd=mcls_cd, inds_scls_cd=scls_cd,
+                            )
+                    except RuntimeError as e:
+                        st.error(str(e))
+                        stores_df = pd.DataFrame()
+                    st.session_state.sangkwon_result = (addr, lat, lon, int(radius), stores_df)
+
+        result = st.session_state.get("sangkwon_result")
+        if result:
+            addr, lat, lon, used_radius, stores_df = result
+            if stores_df.empty:
+                st.info("반경 내 조회된 상가업소가 없습니다.")
+            else:
+                st.success(f"'{addr}' 주변 반경 {used_radius}m 내 상가업소 {len(stores_df)}건")
+
+                st.caption("업종 대분류별 분포")
+                st.bar_chart(stores_df["indsLclsNm"].value_counts())
+
+                display_cols = {
+                    "bizesNm": "상호명", "indsLclsNm": "대분류", "indsMclsNm": "중분류", "indsSclsNm": "소분류",
+                    "rdnmAdr": "도로명주소", "lnoAdr": "지번주소", "거리(m)": "거리(m)",
+                }
+                show_df = stores_df[[c for c in display_cols if c in stores_df.columns]].rename(columns=display_cols)
+                st.dataframe(show_df, width='stretch', hide_index=True)
+
+                csv_bytes = show_df.to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "📄 CSV 다운로드", csv_bytes, "nearby_stores.csv", "text/csv",
+                    key="sangkwon_csv",
+                )
+
+                map_df = stores_df.copy()
+                map_df["표시"] = map_df["bizesNm"].astype(str) + " (" + map_df["indsSclsNm"].astype(str) + ")"
+                map_df = pd.concat([
+                    pd.DataFrame({"lat": [lat], "lon": [lon], "표시": ["📍 기준 위치"]}),
+                    map_df[["lat", "lon", "표시"]],
+                ], ignore_index=True)
+                render_address_map(map_df, label_col="표시", vworld_key=vworld_key, highlight_lat=lat, highlight_lon=lon)
+
+# ------------------------------------------------------------------
+# 탭 12: 서울 상권분석 (서울 열린데이터광장 우리마을가게 상권분석서비스 Open API)
+# ------------------------------------------------------------------
+with tab_seoul:
+    st.write("**서울 열린데이터광장 우리마을가게 상권분석서비스**로 서울시 상권의 추정매출·점포 현황·생활인구·직장인구를 조회합니다. "
+             "(서울시 소재 상권만 지원, 데이터는 분기 단위로 갱신됩니다.)")
+    if not seoul_key:
+        st.warning("사이드바에 서울 열린데이터광장 인증키를 입력해야 사용할 수 있습니다.")
+    elif not kakao_key:
+        st.warning("사이드바에 카카오맵 REST API 키를 입력해야 주소를 좌표로 변환할 수 있습니다.")
+    else:
+        def _fmt_seoul_quarter(q):
+            return f"{q[:4]}년 {q[4:]}분기"
+
+        seoul_addr = st.text_input(
+            "주소", placeholder="예: 서울특별시 마포구 연남동 227-1", key="seoul_addr",
+        )
+
+        if st.button("상권 찾기", type="primary", key="seoul_submit"):
+            addr = seoul_addr.strip()
+            if not addr:
+                st.warning("주소를 입력해주세요.")
+            else:
+                with st.spinner("주소 좌표 변환 중..."):
+                    coord, reason = geocode_address_kakao(kakao_key, addr)
+                if not coord:
+                    st.error(f"좌표를 찾지 못했습니다 ({reason}).")
+                    st.session_state.seoul_result = None
+                else:
+                    lon, lat = coord
+                    try:
+                        with st.spinner("서울시 상권 위치 데이터를 불러오는 중... (최초 1회, 최대 1분 정도 걸릴 수 있습니다)"):
+                            locations_df = _load_seoul_trade_area_locations(seoul_key)
+
+                        if locations_df.empty:
+                            st.error("서울시 상권 위치 데이터를 가져오지 못했습니다. 인증키를 확인해주세요.")
+                            st.session_state.seoul_result = None
+                        else:
+                            trdar_row, distance_m = find_nearest_seoul_trade_area(locations_df, lon, lat)
+
+                            with st.spinner("추정매출·점포·생활인구·직장인구 데이터를 불러오는 중... (최초 1회, 최대 1분 정도 걸릴 수 있습니다)"):
+                                selng_df, selng_q = _load_seoul_quarter_dataset(seoul_key, SEOUL_TRDAR_SALES_SERVICE)
+                                stor_df, stor_q = _load_seoul_quarter_dataset(seoul_key, SEOUL_TRDAR_STORE_SERVICE)
+                                flpop_df, flpop_q = _load_seoul_quarter_dataset(seoul_key, SEOUL_TRDAR_FLPOP_SERVICE)
+                                wrc_df, wrc_q = _load_seoul_quarter_dataset(seoul_key, SEOUL_TRDAR_WRC_POPLTN_SERVICE)
+
+                            st.session_state.seoul_result = (
+                                addr, lon, lat, trdar_row, distance_m,
+                                selng_df, selng_q, stor_df, stor_q, flpop_df, flpop_q, wrc_df, wrc_q,
+                            )
+                    except RuntimeError as e:
+                        st.error(str(e))
+                        st.session_state.seoul_result = None
+
+        result = st.session_state.get("seoul_result")
+        if result:
+            (addr, lon, lat, trdar_row, distance_m,
+             selng_df, selng_q, stor_df, stor_q, flpop_df, flpop_q, wrc_df, wrc_q) = result
+
+            trdar_cd = trdar_row["TRDAR_CD"]
+            if distance_m > 1500:
+                st.warning(f"가장 가까운 서울시 상권도 {distance_m:,.0f}m 떨어져 있습니다 — 서울시 상권분석 대상 지역이 아닐 수 있습니다.")
+
+            st.success(
+                f"'{addr}'에서 가장 가까운 상권: **{trdar_row['TRDAR_CD_NM']}** "
+                f"({trdar_row['TRDAR_SE_CD_NM']} · {trdar_row['SIGNGU_CD_NM']} {trdar_row['ADSTRD_CD_NM']} · "
+                f"약 {distance_m:,.0f}m)"
+            )
+
+            sel = selng_df[selng_df["TRDAR_CD"] == trdar_cd].copy() if not selng_df.empty else pd.DataFrame()
+            sto = stor_df[stor_df["TRDAR_CD"] == trdar_cd].copy() if not stor_df.empty else pd.DataFrame()
+            flp = flpop_df[flpop_df["TRDAR_CD"] == trdar_cd] if not flpop_df.empty else pd.DataFrame()
+            wrc = wrc_df[wrc_df["TRDAR_CD"] == trdar_cd] if not wrc_df.empty else pd.DataFrame()
+
+            total_sales = pd.to_numeric(sel["THSMON_SELNG_AMT"], errors="coerce").sum() if not sel.empty else 0
+            total_stores = pd.to_numeric(sto["STOR_CO"], errors="coerce").sum() if not sto.empty else 0
+            total_flpop = pd.to_numeric(flp["TOT_FLPOP_CO"], errors="coerce").sum() if not flp.empty else None
+            total_wrc = pd.to_numeric(wrc["TOT_WRC_POPLTN_CO"], errors="coerce").sum() if not wrc.empty else None
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric(f"추정매출 ({_fmt_seoul_quarter(selng_q)})", f"{total_sales / 1e8:,.1f}억원" if total_sales else "-")
+            c2.metric(f"점포 수 ({_fmt_seoul_quarter(stor_q)})", f"{total_stores:,.0f}개" if total_stores else "-")
+            c3.metric(f"생활인구 ({_fmt_seoul_quarter(flpop_q)})", f"{total_flpop:,.0f}명" if total_flpop is not None else "-")
+            c4.metric(f"직장인구 ({_fmt_seoul_quarter(wrc_q)})", f"{total_wrc:,.0f}명" if total_wrc is not None else "-")
+
+            if sel.empty:
+                st.info(f"{_fmt_seoul_quarter(selng_q)} 추정매출 데이터가 없습니다.")
+            else:
+                st.subheader("📊 업종별 매출·점포 현황")
+                merged = sel[["SVC_INDUTY_CD", "SVC_INDUTY_CD_NM", "THSMON_SELNG_AMT", "THSMON_SELNG_CO"]].copy()
+                if not sto.empty:
+                    merged = merged.merge(
+                        sto[["SVC_INDUTY_CD", "STOR_CO", "OPBIZ_RT", "CLSBIZ_RT"]],
+                        on="SVC_INDUTY_CD", how="left",
+                    )
+                for col in ["THSMON_SELNG_AMT", "THSMON_SELNG_CO", "STOR_CO", "OPBIZ_RT", "CLSBIZ_RT"]:
+                    if col in merged.columns:
+                        merged[col] = pd.to_numeric(merged[col], errors="coerce")
+                merged = merged.sort_values("THSMON_SELNG_AMT", ascending=False)
+
+                display_cols = {
+                    "SVC_INDUTY_CD_NM": "업종", "THSMON_SELNG_AMT": "매출액(원)", "THSMON_SELNG_CO": "매출건수",
+                    "STOR_CO": "점포수", "OPBIZ_RT": "개업률(%)", "CLSBIZ_RT": "폐업률(%)",
+                }
+                show_cols = [c for c in display_cols if c in merged.columns]
+                st.dataframe(merged[show_cols].rename(columns=display_cols), width='stretch', hide_index=True)
+
+                csv_bytes = merged[show_cols].rename(columns=display_cols).to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "📄 CSV 다운로드", csv_bytes, "seoul_trade_area_industries.csv", "text/csv",
+                    key="seoul_csv",
+                )
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.caption("요일별 매출 (업종 전체 합계)")
+                    day_cols = {
+                        "MON_SELNG_AMT": "월", "TUES_SELNG_AMT": "화", "WED_SELNG_AMT": "수", "THUR_SELNG_AMT": "목",
+                        "FRI_SELNG_AMT": "금", "SAT_SELNG_AMT": "토", "SUN_SELNG_AMT": "일",
+                    }
+                    day_sums = pd.Series({
+                        label: pd.to_numeric(sel[col], errors="coerce").sum()
+                        for col, label in day_cols.items() if col in sel.columns
+                    })
+                    st.bar_chart(day_sums)
+                with c2:
+                    st.caption("시간대별 매출 (업종 전체 합계)")
+                    tz_cols = {
+                        "TMZON_00_06_SELNG_AMT": "00~06", "TMZON_06_11_SELNG_AMT": "06~11",
+                        "TMZON_11_14_SELNG_AMT": "11~14", "TMZON_14_17_SELNG_AMT": "14~17",
+                        "TMZON_17_21_SELNG_AMT": "17~21", "TMZON_21_24_SELNG_AMT": "21~24",
+                    }
+                    tz_sums = pd.Series({
+                        label: pd.to_numeric(sel[col], errors="coerce").sum()
+                        for col, label in tz_cols.items() if col in sel.columns
+                    })
+                    st.bar_chart(tz_sums)
+
+            map_df = pd.DataFrame({
+                "lat": [trdar_row["lat"], lat],
+                "lon": [trdar_row["lon"], lon],
+                "표시": [f"🏙️ {trdar_row['TRDAR_CD_NM']}", "📍 입력 주소"],
+            })
+            render_address_map(map_df, label_col="표시", vworld_key=vworld_key, highlight_lat=lat, highlight_lon=lon)

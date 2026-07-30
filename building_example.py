@@ -28,7 +28,9 @@ PublicDataReader(pip 배포판)의 BuildingLedger.get_data()는 페이지 수를
 (len(rows) >= total_count 되면 종료) 우회 처리합니다.
 """
 
+import concurrent.futures
 import datetime
+import functools
 import os
 import re
 import time
@@ -1105,6 +1107,235 @@ def get_reb_vacancy_trend(reb_key: str, statbl_id: str, cls_id, start_wrttime: s
         reb_key, statbl_id, CLS_ID=cls_id, START_WRTTIME=start_wrttime, END_WRTTIME=end_wrttime, pSize=1000,
     )
     return df, message
+
+
+# ------------------------------------------------------------------
+# 소상공인시장진흥공단 상가(상권)정보 Open API
+# (data.go.kr에서 "소상공인시장진흥공단_상가(상권)정보_API"를 별도로 활용신청해야 하며,
+# 승인되면 공공데이터포털 계정의 service_key를 그대로 사용할 수 있다.)
+# ------------------------------------------------------------------
+SANGKWON_API_BASE = "https://apis.data.go.kr/B553077/api/open/sdsc2"
+
+_SANGKWON_UPJONG_CODES_PATH = os.path.join(os.path.dirname(__file__), "sangkwon_upjong_codes.csv")
+
+
+def _haversine_m(lat1, lon1, lat2, lon2):
+    """두 좌표 사이 거리(미터). lat2/lon2는 스칼라 또는 pandas Series 모두 가능."""
+    import numpy as np
+    r = 6371000
+    p1, p2 = np.radians(lat1), np.radians(lat2)
+    dphi = np.radians(lat2 - lat1)
+    dlambda = np.radians(lon2 - lon1)
+    a = np.sin(dphi / 2) ** 2 + np.cos(p1) * np.cos(p2) * np.sin(dlambda / 2) ** 2
+    return r * 2 * np.arcsin(np.sqrt(a))
+
+
+@functools.lru_cache(maxsize=1)
+def load_sangkwon_upjong_codes() -> pd.DataFrame:
+    """상가업종 대/중/소분류(247개) 코드표를 불러온다 (data.go.kr 활용가이드에 포함된 참조 파일 기반, 오프라인)."""
+    return pd.read_csv(_SANGKWON_UPJONG_CODES_PATH, encoding="utf-8-sig", dtype=str)
+
+
+def _sangkwon_request(service_key: str, operation: str, **params):
+    """상가(상권)정보 API를 호출해 (item 목록, totalCount, 안내메시지) 튜플로 반환.
+
+    resultCode가 "00"이 아니면 예외로 올려서 호출부가 st.error로 그대로 보여줄 수 있게 한다.
+    """
+    url = f"{SANGKWON_API_BASE}/{operation}"
+    query = {"serviceKey": service_key, "type": "json", **params}
+    res = requests.get(url, params=query, timeout=15)
+    res.raise_for_status()
+    try:
+        data = res.json()
+    except ValueError:
+        raise RuntimeError(f"소상공인시장진흥공단 API 응답을 해석하지 못했습니다: {res.text[:200]}")
+
+    response = data.get("response", data)
+    header = response.get("header", {}) or {}
+    code, message = header.get("resultCode"), header.get("resultMsg", "알 수 없는 오류")
+    if code not in (None, "00"):
+        raise RuntimeError(f"소상공인시장진흥공단 API 오류({code}): {message}")
+
+    body = response.get("body", {}) or {}
+    items = body.get("items")
+    if not items:
+        rows = []
+    else:
+        item = items.get("item") if isinstance(items, dict) else items
+        rows = [] if item is None else (item if isinstance(item, list) else [item])
+    total_count = int(body.get("totalCount") or len(rows))
+    return rows, total_count, message
+
+
+def get_nearby_stores(
+    service_key: str,
+    lon: float,
+    lat: float,
+    radius: int = 500,
+    inds_lcls_cd: str = None,
+    inds_mcls_cd: str = None,
+    inds_scls_cd: str = None,
+    max_rows: int = 3000,
+) -> pd.DataFrame:
+    """(lon, lat) 중심 반경(m, 최대 2000m) 내 상가업소 목록을 거리순으로 조회.
+
+    업종 대/중/소분류 코드를 넘기면 해당 업종만 필터링된다. 응답의 totalCount가
+    한 페이지(최대 1000건)를 넘으면 max_rows까지 페이지를 이어붙인다.
+    """
+    params = {"radius": radius, "cx": lon, "cy": lat, "numOfRows": 1000, "pageNo": 1}
+    if inds_lcls_cd:
+        params["indsLclsCd"] = inds_lcls_cd
+    if inds_mcls_cd:
+        params["indsMclsCd"] = inds_mcls_cd
+    if inds_scls_cd:
+        params["indsSclsCd"] = inds_scls_cd
+
+    rows, total_count, _ = _sangkwon_request(service_key, "storeListInRadius", **params)
+    all_rows = list(rows)
+    page = 2
+    while rows and len(all_rows) < min(total_count, max_rows):
+        params["pageNo"] = page
+        rows, _, _ = _sangkwon_request(service_key, "storeListInRadius", **params)
+        all_rows.extend(rows)
+        page += 1
+
+    df = pd.DataFrame(all_rows)
+    if df.empty:
+        return df
+    df["lon"] = pd.to_numeric(df["lon"], errors="coerce")
+    df["lat"] = pd.to_numeric(df["lat"], errors="coerce")
+    df["거리(m)"] = _haversine_m(lat, lon, df["lat"], df["lon"]).round(0)
+    return df.sort_values("거리(m)").reset_index(drop=True)
+
+
+# ------------------------------------------------------------------
+# 서울 열린데이터광장 우리마을가게 상권분석서비스 Open API
+# (서비스명이 data.seoul.go.kr 데이터셋 페이지의 "Open API" 탭에만 나오고 검색으로는
+# 안 나와서, 데이터셋별로 직접 Open API 탭을 렌더링해 확인한 값들이다.)
+# ------------------------------------------------------------------
+SEOUL_OPENAPI_BASE = "http://openapi.seoul.go.kr:8088"
+SEOUL_MAX_ROWS_PER_CALL = 1000
+
+# 서비스명: "상권-{항목}" 데이터셋의 실제 영문 서비스명. 상권 위치(TbgisTrdarRelm)만
+# "Vwsm" 대신 "Tbgis" 접두어를 쓴다 — 다른 접두어를 짐작하다 낭비한 시간이 있어 기록.
+SEOUL_TRDAR_LOCATION_SERVICE = "TbgisTrdarRelm"  # 상권영역(위치) — EPSG:5181 좌표
+SEOUL_TRDAR_SALES_SERVICE = "VwsmTrdarSelngQq"  # 추정매출 (분기+업종별)
+SEOUL_TRDAR_STORE_SERVICE = "VwsmTrdarStorQq"  # 점포 수/개폐업률 (분기+업종별)
+SEOUL_TRDAR_FLPOP_SERVICE = "VwsmTrdarFlpopQq"  # 생활인구 (분기별, 업종 구분 없음)
+SEOUL_TRDAR_WRC_POPLTN_SERVICE = "VwsmTrdarWrcPopltnQq"  # 직장인구 (분기별, 업종 구분 없음)
+
+
+def _seoul_request(seoul_key: str, service: str, start: int, end: int, extra_path: str = None):
+    """서울 열린데이터광장 API 한 페이지를 호출해 (row 목록, list_total_count) 반환.
+
+    한 번에 최대 1000건(=end-start+1)만 요청 가능하다(초과 시 ERROR-336). 데이터가
+    없으면(INFO-200) 빈 리스트를, 그 외 오류는 예외로 올려서 호출부가 st.error로
+    그대로 보여줄 수 있게 한다.
+    """
+    parts = [SEOUL_OPENAPI_BASE, seoul_key, "json", service, str(start), str(end)]
+    if extra_path:
+        parts.append(str(extra_path))
+    url = "/".join(parts) + "/"
+    res = requests.get(url, timeout=15)
+    res.raise_for_status()
+    try:
+        data = res.json()
+    except ValueError:
+        raise RuntimeError(f"서울 열린데이터광장 API 응답을 해석하지 못했습니다: {res.text[:200]}")
+
+    # 인증키 오류 등 최상위 오류는 서비스명 없이 {"RESULT": {...}} 형태로 온다.
+    result = data.get(service, data).get("RESULT", {}) if service in data else data.get("RESULT", {})
+    code, message = result.get("CODE"), result.get("MESSAGE", "알 수 없는 오류")
+    if code == "INFO-200":
+        return [], 0
+    if code != "INFO-000":
+        raise RuntimeError(f"서울 열린데이터광장 API 오류({code}): {message}")
+
+    payload = data[service]
+    return payload.get("row") or [], int(payload.get("list_total_count") or 0)
+
+
+def _seoul_fetch_all(seoul_key: str, service: str, extra_path: str = None, max_rows: int = 200_000) -> pd.DataFrame:
+    """(extra_path로 필터된) 전체 데이터를 병렬 페이지네이션으로 가져와 DataFrame으로 반환.
+
+    일부 서비스(예: 점포)는 분기 하나만 필터해도 수만 건이라 순차 요청이면 수십 초가
+    걸린다 — 스레드풀로 동시에 가져와 실사용 대기 시간을 크게 줄인다.
+    """
+    first_rows, total_count = _seoul_request(seoul_key, service, 1, SEOUL_MAX_ROWS_PER_CALL, extra_path)
+    total_count = min(total_count, max_rows)
+    all_rows = list(first_rows)
+
+    remaining_starts = list(range(SEOUL_MAX_ROWS_PER_CALL + 1, total_count + 1, SEOUL_MAX_ROWS_PER_CALL))
+    if remaining_starts:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [
+                executor.submit(
+                    _seoul_request, seoul_key, service, start,
+                    min(start + SEOUL_MAX_ROWS_PER_CALL - 1, total_count), extra_path,
+                )
+                for start in remaining_starts
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                rows, _ = future.result()
+                all_rows.extend(rows)
+
+    return pd.DataFrame(all_rows)
+
+
+def seoul_current_quarter_id(today: datetime.date = None) -> str:
+    """오늘 날짜 기준 서울 상권분석서비스 분기 코드(예: 2026년 1분기 -> "20261")를 계산.
+
+    한국부동산원 쪽 분기코드(YYYYQQ, 2자리)와 달리 서울시 쪽은 분기가 1자리(YYYYQ)다.
+    """
+    today = today or datetime.date.today()
+    quarter = (today.month - 1) // 3 + 1
+    return f"{today.year}{quarter}"
+
+
+def _seoul_prev_quarter_id(yyqu: str) -> str:
+    year, quarter = int(yyqu[:4]), int(yyqu[4:])
+    return f"{year - 1}4" if quarter == 1 else f"{year}{quarter - 1}"
+
+
+def get_seoul_trade_area_locations(seoul_key: str) -> pd.DataFrame:
+    """서울시 전체 상권(약 1,650개)의 위치 정보를 가져온다.
+
+    원본 좌표(XCNTS_VALUE/YDNTS_VALUE)는 EPSG:5181(중부원점 TM)이라 pyproj로 WGS84
+    위경도(lon/lat 컬럼)로 변환해 둔다 — 지도/거리계산에 바로 쓸 수 있게.
+    """
+    from pyproj import Transformer
+
+    df = _seoul_fetch_all(seoul_key, SEOUL_TRDAR_LOCATION_SERVICE)
+    if df.empty:
+        return df
+    transformer = Transformer.from_crs("EPSG:5181", "EPSG:4326", always_xy=True)
+    xs = pd.to_numeric(df["XCNTS_VALUE"], errors="coerce")
+    ys = pd.to_numeric(df["YDNTS_VALUE"], errors="coerce")
+    df["lon"], df["lat"] = transformer.transform(xs.to_numpy(), ys.to_numpy())
+    return df
+
+
+def find_nearest_seoul_trade_area(locations_df: pd.DataFrame, lon: float, lat: float):
+    """(lon, lat)에서 가장 가까운 서울 상권 1건을 (해당 row, 거리(m)) 튜플로 반환."""
+    distances = _haversine_m(lat, lon, locations_df["lat"], locations_df["lon"])
+    idx = distances.idxmin()
+    return locations_df.loc[idx], float(distances.loc[idx])
+
+
+def get_seoul_trade_area_quarter_dataset(seoul_key: str, service: str, quarter: str = None, max_lookback: int = 3):
+    """지정 분기(quarter)의 서울 상권분석서비스 전체(시 전역) 데이터를 가져온다.
+
+    데이터가 없으면(발표 지연 등) 최대 max_lookback개 이전 분기까지 자동으로 물러나며
+    재시도한다. 반환값: (DataFrame, 실제 사용된 분기코드).
+    """
+    quarter = quarter or seoul_current_quarter_id()
+    current = quarter
+    for _ in range(max_lookback + 1):
+        df = _seoul_fetch_all(seoul_key, service, extra_path=current)
+        if not df.empty:
+            return df, current
+        current = _seoul_prev_quarter_id(current)
+    return pd.DataFrame(), quarter
 
 
 def combine_zoning_sources(master: dict) -> list:
