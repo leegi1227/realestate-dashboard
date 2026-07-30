@@ -54,6 +54,7 @@ from building_example import (
     reverse_match_transactions,
     split_common_and_varying,
 )
+from report_generator import fetch_report_data, generate_pptx
 
 
 # Leaflet + OpenStreetMap을 삽입하는 Custom Components v2 컴포넌트 (기존 pydeck
@@ -268,6 +269,56 @@ def _load_seoul_quarter_dataset(seoul_key: str, service: str):
 
 st.set_page_config(page_title="건축물대장 조회", page_icon="🏢", layout="wide")
 
+
+def _get_secret(key: str):
+    try:
+        return st.secrets.get(key)
+    except Exception:
+        return None
+
+
+def _check_auth() -> bool:
+    """st.secrets에 저장된 AUTH_ID/AUTH_PW로 로그인 게이트를 건다.
+
+    비밀번호 자체는 코드에 없고 Streamlit Cloud의 'Secrets' 설정(배포본) 또는
+    로컬 .streamlit/secrets.toml(둘 다 git에 커밋되지 않음)에서만 읽는다.
+    """
+    if st.session_state.get("authenticated"):
+        return True
+
+    st.title("🏢 국토교통부 건축물대장 조회")
+    st.info("로그인 후 이용할 수 있습니다.")
+
+    valid_id, valid_pw = _get_secret("AUTH_ID"), _get_secret("AUTH_PW")
+    if not valid_id or not valid_pw:
+        st.error(
+            "서버에 로그인 정보(AUTH_ID/AUTH_PW)가 설정되어 있지 않습니다. "
+            "Streamlit Cloud 앱 설정 > Secrets에 추가해주세요."
+        )
+        return False
+
+    with st.form("login_form"):
+        user_id = st.text_input("아이디")
+        user_pw = st.text_input("비밀번호", type="password")
+        submitted = st.form_submit_button("로그인", type="primary")
+
+    if submitted:
+        if user_id == valid_id and user_pw == valid_pw:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("아이디 또는 비밀번호가 올바르지 않습니다.")
+    return False
+
+
+if not _check_auth():
+    st.stop()
+
+with st.sidebar:
+    if st.button("로그아웃", key="logout_button"):
+        st.session_state.authenticated = False
+        st.rerun()
+
 st.title("🏢 국토교통부 건축물대장 조회")
 st.caption("PublicDataReader 기반 · 페이지네이션 버그 우회 적용")
 
@@ -361,10 +412,10 @@ def _resolve_codes():
     return sigungu_code, bdong_code, row["시도명"], row["시군구명"]
 
 
-tab_single, tab_report, tab_price, tab_district, tab_old, tab_seismic, tab_priceh, tab_map, tab_geocode, tab_commercial, tab_sangkwon, tab_seoul = st.tabs([
+tab_single, tab_report, tab_price, tab_district, tab_old, tab_seismic, tab_priceh, tab_map, tab_geocode, tab_commercial, tab_sangkwon, tab_seoul, tab_autopptx = st.tabs([
     "🔍 단일 조회", "📋 종합 리포트", "💰 실거래가",
     "📊 동단위 통계", "🏚️ 노후건축물", "🧱 내진 취약 스캔", "💹 공시가격 시계열", "🗺️ 지도 업로드",
-    "📍 지오코딩", "🏬 상업용부동산 공실률", "🏪 주변 상가업소", "🏙️ 서울 상권분석",
+    "📍 지오코딩", "🏬 상업용부동산 공실률", "🏪 주변 상가업소", "🏙️ 서울 상권분석", "📑 자동 pptx 리포트",
 ])
 
 # ------------------------------------------------------------------
@@ -1379,3 +1430,63 @@ with tab_seoul:
                 "표시": [f"🏙️ {trdar_row['TRDAR_CD_NM']}", "📍 입력 주소"],
             })
             render_address_map(map_df, label_col="표시", vworld_key=vworld_key, highlight_lat=lat, highlight_lon=lon)
+
+# ------------------------------------------------------------------
+# 탭 13: 자동 pptx 리포트 (주소 하나로 실제 데이터를 채운 부동산 분석 리포트 생성)
+# ------------------------------------------------------------------
+with tab_autopptx:
+    st.write(
+        "왼쪽 사이드바에 입력한 주소로 **부동산 분석 리포트(pptx)**를 자동 생성합니다. "
+        "건축물대장 · 실거래가 · 공시가격 · 동단위 시장통계 · 상업용부동산 공실률 · 주변 상가업소 · "
+        "(서울 소재 시) 서울 상권분석까지, 실제로 조회한 데이터로 슬라이드를 채웁니다."
+    )
+    st.caption(
+        "※ 상권 성격 · SNS 트렌드 · 개발호재 · SWOT 같은 정성적 항목은 공공데이터로 자동 수집되지 않아 "
+        "이 리포트에는 포함되지 않습니다."
+    )
+
+    if not service_key:
+        st.warning("사이드바에 공공데이터포털 서비스키를 입력해야 사용할 수 있습니다.")
+    elif not kakao_key:
+        st.warning("사이드바에 카카오맵 REST API 키를 입력해야 위치 지도를 생성할 수 있습니다.")
+    else:
+        if st.button("📑 리포트 생성", type="primary", key="autopptx_submit"):
+            try:
+                with st.spinner("주소를 코드로 변환하는 중..."):
+                    sigungu_code, bdong_code, addr_row = resolve_dong_code(address)
+
+                progress_box = st.empty()
+
+                def _on_report_progress(msg):
+                    progress_box.info(msg)
+
+                with st.spinner("리포트 데이터 수집 중... (최초 조회 시 1~2분 정도 걸릴 수 있습니다)"):
+                    report_data = fetch_report_data(
+                        service_key=service_key,
+                        sido=addr_row["시도명"], sigungu_name=addr_row["시군구명"], dong_name=addr_row["동명"],
+                        sigungu_code=sigungu_code, bdong_code=bdong_code,
+                        bun=bun or None, ji=ji if ji and ji != "0" else None,
+                        kakao_key=kakao_key, vworld_key=vworld_key, reb_key=reb_key,
+                        sangkwon_key=sangkwon_key, seoul_key=seoul_key,
+                        progress_callback=_on_report_progress,
+                    )
+                progress_box.empty()
+
+                with st.spinner("pptx 파일 조립 중..."):
+                    pptx_bytes = generate_pptx(report_data)
+
+                st.session_state.autopptx_result = (report_data["address"], pptx_bytes)
+                st.success(f"'{report_data['address']}' 리포트를 생성했습니다.")
+            except Exception as e:
+                st.error(f"리포트 생성 실패: {e}")
+                st.session_state.autopptx_result = None
+
+    result = st.session_state.get("autopptx_result")
+    if result:
+        addr_label, pptx_bytes = result
+        st.download_button(
+            "📥 pptx 다운로드", pptx_bytes,
+            f"{addr_label.replace(' ', '_')}_분석리포트.pptx",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            type="primary", width='stretch', key="autopptx_download",
+        )
