@@ -920,7 +920,14 @@ def geocode_address_kakao(kakao_key: str, address: str):
         return None, "일치하는 주소를 찾지 못함"
 
     doc = documents[0]
+    # 지번(address)과 도로명(road_address) 좌표는 같은 곳이어도 미세하게 다를 수 있다.
+    # 지번 좌표는 필지(폴리곤) 중심점이라 필지가 길쭉하거나 불규칙하게 쪼개진 곳(오래된
+    # 저층 밀집 주거지 등)에서는 실제 건물 위치와 눈에 띄게 어긋나 보일 수 있는 반면,
+    # 도로명 좌표는 건물 출입구 기준이라 더 정확하다 — 있으면 도로명 좌표를 우선 쓴다.
+    road = doc.get("road_address")
     try:
+        if road and road.get("x") and road.get("y"):
+            return (float(road["x"]), float(road["y"])), None
         return (float(doc["x"]), float(doc["y"])), None
     except (KeyError, TypeError, ValueError):
         return None, "응답 형식을 해석하지 못함"

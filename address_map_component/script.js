@@ -260,7 +260,11 @@ function renderMap(L, mapEl, data, setTriggerValue) {
   const pinIcon = L.icon({
     iconUrl: PIN_IMAGE_URL,
     iconSize: [36, 36],
-    iconAnchor: [18, 36],
+    // PIN_SVG의 뾰족한 끝은 64x64 viewBox 안에서 y=62(바닥에서 2px 여백이 있음),
+    // 36px로 축소했을 때 62/64*36=34.875 — anchor를 36으로 두면 실제 뾰족점보다
+    // 살짝(약 1.1px) 아래를 좌표에 맞추게 되어 핀이 실제 위치보다 미세하게 위로
+    // 떠 보인다. 측정해서 발견한 값 그대로 정확히 맞춘다.
+    iconAnchor: [18, 34.875],
   });
 
   markers.forEach((m) => {
