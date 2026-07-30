@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  html, body, #map { height: 100%; margin: 0; padding: 0; }
+  .kmc-pin {
+    width: 26px; height: 26px; border-radius: 50% 50% 50% 0;
+    background: #C1652F; border: 3px solid #fff; transform: rotate(-45deg);
+    box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+  }
+  .kmc-pin::after {
+    content: ""; position: absolute; width: 10px; height: 10px; border-radius: 50%;
+    background: #fff; top: 8px; left: 8px;
+  }
+  .leaflet-control-attribution { font-size: 10px; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+  // 실제 자동화 단계에서는 이 4개 좌표만 대시보드의 geocode_address_kakao() 결과와
+  // find_nearest_seoul_trade_area()가 찾은 인근 지하철역 좌표로 바꿔치기하면 된다.
+  const subjectLat = 37.55698, subjectLon = 126.92455; // 연남동 227-1 근사 (홍대입구역 3번 출구 인근)
+  const exit3 = [37.558512, 126.925302]; // address_map_component/subway_exits.json 기반 실측 좌표
+
+  const map = L.map('map', { zoomControl: false, attributionControl: true }).setView([subjectLat, subjectLon], 17);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+  }).addTo(map);
+
+  const pinIcon = L.divIcon({ className: '', html: '<div class="kmc-pin" style="position:relative;"></div>', iconSize: [26,26], iconAnchor: [13,26] });
+  L.marker([subjectLat, subjectLon], { icon: pinIcon }).addTo(map)
+    .bindTooltip('대상 건물 위치', { permanent: true, direction: 'top', offset: [0,-24], className: 'kmc-tooltip' });
+
+  L.circleMarker(exit3, { radius: 7, color: '#fff', weight: 2, fillColor: '#0090D2', fillOpacity: 1 }).addTo(map)
+    .bindTooltip('홍대입구역 3번 출구', { permanent: true, direction: 'right', offset: [8,0] });
+
+  L.circle([subjectLat, subjectLon], { radius: 300, color: '#1E2A44', weight: 1.5, fillOpacity: 0.04, dashArray: '4,4' }).addTo(map);
+
+  // Playwright가 렌더 완료를 감지하는 신호 (타일 로드 대기용)
+  window._mapReady = false;
+  map.whenReady(() => { setTimeout(() => { window._mapReady = true; }, 1500); });
+</script>
+</body>
+</html>

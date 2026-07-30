@@ -26,7 +26,13 @@ const MUTED = "6B7280";
 const CARD_BG = "F5F6F8";
 const GRID_LINE = "DCE1E8";
 
-const FONT_HEAD = "Cambria";
+// 맑은 고딕을 직접 지정해봤으나(가독성 개선 시도), 이 환경에서는 "굵게"를 준 한글이
+// 깨진 장식체로 렌더링되는 버그가 있었다(실제 PowerPoint에서도 재현될 수 있어 위험 —
+// 정상체는 멀쩡한데 bold만 깨지는 걸 별도 테스트로 확인). Cambria/Calibri 조합(세리프+산세리프
+// 혼용)도 제목·본문 글꼴이 달라 통일감이 떨어졌던 문제가 있어, 굵게/일반 모두 깨끗하게
+// 렌더링되는 것을 확인한 Calibri 하나로 통일했다(한글은 OS 기본 대체 글꼴로 표시되며,
+// Windows에서는 이것이 사실상 맑은 고딕과 동일하다). 제목/본문 구분은 크기·굵기로만 준다.
+const FONT_HEAD = "Calibri";
 const FONT_BODY = "Calibri";
 
 // ------------------------------------------------------------------
@@ -119,30 +125,12 @@ const REPORT_DATA = {
   },
 
   // golmok.seoul.go.kr(서울시 상권분석 서비스) 화면 스타일을 참고한 상권영역 지도 슬라이드용
-  // 데이터. TbgisTrdarRelm이 실제로 주는 값은 상권 중심점(1점) + 면적뿐, 경계 폴리곤
-  // 좌표는 주지 않는다 — 그래서 buildings/boundary는 시각적 예시(mock)이고, 실제 자동화
-  // 단계에서는 면적(RELM_AR)으로 크기를 추정한 원형 근사, 또는 별도 폴리곤 데이터 소스가
-  // 필요하다는 점을 그대로 유지해야 한다.
+  // 데이터. TbgisTrdarRelm은 상권 중심점(1점)+면적만 주고 경계 폴리곤 좌표는 안 주므로,
+  // locationImage는 정확한 상권 경계가 아니라 대상 위치 중심의 실제 지도 스크린샷이다
+  // (map_shot.html로 생성 — Leaflet+OSM, 무료/키 불필요. 실제 자동화 단계에서는 대시보드의
+  // geocode_address_kakao() 좌표를 같은 방식으로 넘겨 매 주소마다 새로 캡처하면 된다).
   tradeAreaMap: {
-    boundaryPoints: [
-      { x: 1.3, y: 0.75 }, { x: 4.3, y: 0.35 }, { x: 5.9, y: 1.7 },
-      { x: 5.3, y: 3.9 }, { x: 2.7, y: 4.5 }, { x: 0.55, y: 2.9 },
-    ],
-    buildings: [
-      { x: 0.5, y: 0.5, w: 0.55, h: 0.4, color: "E8C4AE" }, { x: 1.3, y: 0.35, w: 0.4, h: 0.55, color: "C9C7E0" },
-      { x: 2.0, y: 0.55, w: 0.6, h: 0.35, color: "BFE0C4" }, { x: 2.9, y: 0.3, w: 0.45, h: 0.45, color: "E8C4AE" },
-      { x: 3.6, y: 0.5, w: 0.5, h: 0.4, color: "F0D9B5" }, { x: 4.4, y: 0.7, w: 0.4, h: 0.5, color: "C9C7E0" },
-      { x: 1.1, y: 1.1, w: 0.5, h: 0.45, color: "BFE0C4" }, { x: 1.85, y: 1.25, w: 0.55, h: 0.4, color: "E8C4AE" },
-      { x: 2.65, y: 1.05, w: 0.4, h: 0.55, color: "F0D9B5" }, { x: 3.3, y: 1.3, w: 0.5, h: 0.4, color: "E8C4AE" },
-      { x: 4.05, y: 1.15, w: 0.45, h: 0.5, color: "BFE0C4" }, { x: 4.8, y: 1.35, w: 0.5, h: 0.45, color: "C9C7E0" },
-      { x: 1.5, y: 1.85, w: 0.6, h: 0.4, color: "F0D9B5" }, { x: 2.4, y: 1.95, w: 0.45, h: 0.5, color: "E8C4AE" },
-      { x: 3.15, y: 1.85, w: 0.5, h: 0.45, color: "BFE0C4" }, { x: 4.0, y: 2.0, w: 0.55, h: 0.4, color: "E8C4AE" },
-      { x: 0.6, y: 2.35, w: 0.45, h: 0.5, color: "C9C7E0" }, { x: 4.7, y: 2.15, w: 0.4, h: 0.5, color: "F0D9B5" },
-      { x: 1.9, y: 2.5, w: 0.5, h: 0.45, color: "E8C4AE" }, { x: 2.7, y: 2.55, w: 0.55, h: 0.4, color: "BFE0C4" },
-      { x: 3.5, y: 2.5, w: 0.45, h: 0.5, color: "F0D9B5" }, { x: 0.7, y: 3.0, w: 0.5, h: 0.45, color: "E8C4AE" },
-      { x: 1.5, y: 3.1, w: 0.45, h: 0.5, color: "C9C7E0" }, { x: 2.3, y: 3.15, w: 0.55, h: 0.4, color: "F0D9B5" },
-    ],
-    subjectMarker: { x: 3.0, y: 2.7 },
+    locationImage: "location_map.png",
     stats: [
       { label: "유동인구 (도로변)", low: "359명", high: "2,932명" },
       { label: "유동인구 (건물 내부)", low: "0명", high: "608명" },
@@ -338,22 +326,6 @@ function chartAxisDefaults() {
     valGridLine: { color: GRID_LINE, size: 0.75 },
     showLegend: false,
   };
-}
-
-// pptxgenjs의 "line" 도형은 자신의 바운딩박스 대각선만 그리므로, 임의의 점 목록을
-// 잇는 다각형 외곽선은 변(edge)마다 바운딩박스 + flipV를 계산해 개별 선분으로 그린다.
-function drawPolylineSegment(slide, x1, y1, x2, y2, opts) {
-  const x = Math.min(x1, x2), y = Math.min(y1, y2);
-  const w = Math.max(Math.abs(x2 - x1), 0.01), h = Math.max(Math.abs(y2 - y1), 0.01);
-  const sameDiagonal = (x1 <= x2 && y1 <= y2) || (x1 >= x2 && y1 >= y2);
-  slide.addShape("line", { x, y, w, h, flipV: !sameDiagonal, line: opts });
-}
-
-function drawPolygonOutline(slide, points, opts) {
-  for (let i = 0; i < points.length; i++) {
-    const p1 = points[i], p2 = points[(i + 1) % points.length];
-    drawPolylineSegment(slide, p1.x, p1.y, p2.x, p2.y, opts);
-  }
 }
 
 // ==================================================================
@@ -728,37 +700,17 @@ if (REPORT_DATA.isSeoul) {
   const mapX = 0.6, mapY = 1.3, mapW = 6.5, mapH = 5.2;
   const tm = REPORT_DATA.tradeAreaMap;
 
+  // 실제 위치 지도 스크린샷 (OpenStreetMap/Leaflet, map_shot.html로 생성 — 300m 반경 표시).
+  // 이미지 비율(2600x2080 = 1.25)을 mapW/mapH 비율과 맞춰뒀기 때문에 찌그러짐 없이 꽉 채워진다.
+  slide.addImage({ path: tm.locationImage, x: mapX, y: mapY, w: mapW, h: mapH, sizing: { type: "cover", w: mapW, h: mapH } });
   slide.addShape("roundRect", {
     x: mapX, y: mapY, w: mapW, h: mapH, rectRadius: 0.1,
-    fill: { color: "F2F4F7" }, line: { color: GRID_LINE, width: 1 },
+    fill: { type: "none" }, line: { color: GRID_LINE, width: 1 },
   });
-
-  // 건물 블록 (배경 텍스처 — 실제 자동화 단계에서는 지도 스크린샷으로 대체 가능)
-  tm.buildings.forEach((b) => {
-    slide.addShape("roundRect", {
-      x: mapX + b.x, y: mapY + b.y, w: b.w, h: b.h, rectRadius: 0.04,
-      fill: { color: b.color }, line: { color: WHITE, width: 1 },
-    });
-  });
-
-  // 상권영역 경계선
-  const boundary = tm.boundaryPoints.map((p) => ({ x: mapX + p.x, y: mapY + p.y }));
-  drawPolygonOutline(slide, boundary, { color: TERRACOTTA, width: 2.5 });
-
-  // 대상 건물 마커
-  const mk = { x: mapX + tm.subjectMarker.x, y: mapY + tm.subjectMarker.y };
-  slide.addShape("ellipse", { x: mk.x - 0.14, y: mk.y - 0.14, w: 0.28, h: 0.28, fill: { color: NAVY }, line: { color: WHITE, width: 2 } });
-  slide.addShape("ellipse", { x: mk.x - 0.05, y: mk.y - 0.05, w: 0.1, h: 0.1, fill: { color: WHITE }, line: { type: "none" } });
-
-  // 범례
-  const legendY = mapY + mapH - 0.4;
-  slide.addShape("line", { x: mapX + 0.25, y: legendY + 0.1, w: 0.35, h: 0, line: { color: TERRACOTTA, width: 2.5 } });
-  slide.addText("상권영역 경계", { x: mapX + 0.65, y: legendY - 0.12, w: 1.6, h: 0.4, fontFace: FONT_BODY, fontSize: 10.5, color: TEXT_DARK, valign: "middle" });
-  slide.addShape("ellipse", { x: mapX + 2.3, y: legendY - 0.08, w: 0.22, h: 0.22, fill: { color: NAVY }, line: { color: WHITE, width: 1.5 } });
-  slide.addText("대상 건물 위치", { x: mapX + 2.65, y: legendY - 0.12, w: 1.8, h: 0.4, fontFace: FONT_BODY, fontSize: 10.5, color: TEXT_DARK, valign: "middle" });
 
   slide.addText(
-    "※ 예시 이미지입니다. 실제 리포트는 상권 중심좌표 기준 반경 원(면적 근사) 또는 지도 스크린샷으로 대체됩니다.",
+    "※ OpenStreetMap 기반 위치 참고 지도(점선: 대상 건물 기준 반경 300m). 상권영역 경계 자체는 서울시 API가 " +
+    "중심좌표+면적만 제공해 정확한 폴리곤으로 표시할 수 없습니다.",
     { x: mapX, y: mapY + mapH + 0.08, w: mapW, h: 0.3, fontFace: FONT_BODY, fontSize: 8.5, italic: true, color: MUTED }
   );
 
