@@ -912,7 +912,9 @@ def _build_conclusion(master, data):
         points.append(f"최근 공실률이 {first}%→{last}%로 {trend_word} 흐름을 보이고 있습니다.")
 
     ph = data.get("price_history") or {}
-    if ph.get("note"):
+    # ph["note"]는 트렌드가 있을 때만 CAGR 요약 문장이고, 데이터가 없으면 일반 면책조항
+    # 문구(공시가격≠시세)가 그대로 들어있어 결론 문장으로 쓰기에 부적절하다 — trend 유무로 구분.
+    if ph.get("trend") and ph.get("note"):
         points.append(f"공시가격은 {ph['note']}")
 
     if not points:
