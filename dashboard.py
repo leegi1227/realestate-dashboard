@@ -27,7 +27,6 @@ from building_example import (
     analyze_district_stats,
     analyze_old_buildings,
     analyze_price_history,
-    analyze_seismic_risk,
     generate_pdf_report,
     geocode_address_kakao,
     get_bdong_code_map,
@@ -412,9 +411,9 @@ def _resolve_codes():
     return sigungu_code, bdong_code, row["시도명"], row["시군구명"]
 
 
-tab_single, tab_report, tab_price, tab_district, tab_old, tab_seismic, tab_priceh, tab_map, tab_geocode, tab_commercial, tab_sangkwon, tab_seoul, tab_autopptx = st.tabs([
+tab_single, tab_report, tab_price, tab_district, tab_old, tab_priceh, tab_map, tab_geocode, tab_commercial, tab_sangkwon, tab_seoul, tab_autopptx = st.tabs([
     "🔍 단일 조회", "📋 종합 리포트", "💰 실거래가",
-    "📊 동단위 통계", "🏚️ 노후건축물", "🧱 내진 취약 스캔", "💹 공시가격 시계열", "🗺️ 지도 업로드",
+    "📊 동단위 통계", "🏚️ 노후건축물", "💹 공시가격 시계열", "🗺️ 지도 업로드",
     "📍 지오코딩", "🏬 상업용부동산 공실률", "🏪 주변 상가업소", "🏙️ 서울 상권분석", "📑 자동 pptx 리포트",
 ])
 
@@ -830,39 +829,7 @@ with tab_old:
         st.download_button("📄 CSV 다운로드", csv_bytes, "old_buildings.csv", "text/csv", key="old_csv")
 
 # ------------------------------------------------------------------
-# 탭 6: 내진 취약 스캔
-# ------------------------------------------------------------------
-with tab_seismic:
-    st.caption(
-        "`내진 설계 적용 여부` 필드가 명시돼 있으면 그 값을 쓰고, 없으면 사용승인연도 기준 "
-        "내진설계 의무화 연혁(1988 도입 → 2017.12 전면의무화)으로 미적용을 추정합니다. "
-        "추정치이며 실제 구조계산서 확인 전 참고용입니다. (동단위 통계와 데이터 공유·캐시)"
-    )
-    if st.button("내진 취약 스캔", type="primary", key="seismic_submit"):
-        if not service_key:
-            st.error("서비스키를 입력해주세요.")
-        else:
-            try:
-                with st.spinner("주소를 코드로 변환하는 중..."):
-                    sigungu_code, bdong_code, addr_sido, addr_sigungu_name = _resolve_codes()
-                with st.spinner("표제부 전체 수집 중... (캐시되어 있으면 즉시 완료)"):
-                    title_df = _load_district_titles(service_key, sigungu_code, bdong_code)
-                st.session_state.seismic_result = analyze_seismic_risk(title_df, top_n=50)
-            except Exception as e:
-                st.error(f"조회 실패: {e}")
-                st.session_state.seismic_result = None
-
-    seismic = st.session_state.get("seismic_result")
-    if not seismic or seismic["분류별집계"].empty:
-        st.info("**내진 취약 스캔** 버튼을 눌러주세요.")
-    else:
-        st.subheader("분류별 집계")
-        st.dataframe(seismic["분류별집계"], width='stretch')
-        st.subheader("취약 우선순위 목록 (상위 50)")
-        st.dataframe(seismic["취약우선목록"], width='stretch')
-
-# ------------------------------------------------------------------
-# 탭 7: 공시가격 시계열
+# 탭 6: 공시가격 시계열
 # ------------------------------------------------------------------
 with tab_priceh:
     st.caption("사이드바의 번지(bun/ji)를 기준으로, 그 필지의 호(관리건축물대장PK)별 공시가격 추이를 봅니다.")
@@ -902,7 +869,7 @@ with tab_priceh:
             st.line_chart(unit["추이"].set_index("연도"))
 
 # ------------------------------------------------------------------
-# 탭 8: 지도 업로드 — 주소·위도·경도가 담긴 파일을 올리면 지도에 표시
+# 탭 7: 지도 업로드 — 주소·위도·경도가 담긴 파일을 올리면 지도에 표시
 # ------------------------------------------------------------------
 with tab_map:
     st.write("**주소·위도·경도** 컬럼이 포함된 CSV 또는 엑셀 파일을 업로드하면 모든 지점을 지도에 표시합니다.")
@@ -1013,7 +980,7 @@ with tab_map:
         st.info("파일을 업로드해주세요.")
 
 # ------------------------------------------------------------------
-# 탭 9: 지오코딩 — 주소만 넣으면 경도·위도만 반환
+# 탭 8: 지오코딩 — 주소만 넣으면 경도·위도만 반환
 # ------------------------------------------------------------------
 with tab_geocode:
     st.write("**주소**를 입력하면 경도·위도 좌표만 조회합니다. 도로명·지번 주소 모두 지원합니다.")
@@ -1102,7 +1069,7 @@ with tab_geocode:
                 render_address_map(map_df, lat_col="위도", lon_col="경도", label_col="주소", vworld_key=vworld_key)
 
 # ------------------------------------------------------------------
-# 탭 10: 상업용부동산 공실률 (한국부동산원 R-ONE Open API)
+# 탭 9: 상업용부동산 공실률 (한국부동산원 R-ONE Open API)
 # ------------------------------------------------------------------
 with tab_commercial:
     st.write("한국부동산원 상업용부동산 임대동향조사의 상권별 공실률을 조회합니다. "
@@ -1186,7 +1153,7 @@ with tab_commercial:
                         st.line_chart(chart_df)
 
 # ------------------------------------------------------------------
-# 탭 11: 주변 상가업소 (소상공인시장진흥공단 상가(상권)정보 Open API)
+# 탭 10: 주변 상가업소 (소상공인시장진흥공단 상가(상권)정보 Open API)
 # ------------------------------------------------------------------
 with tab_sangkwon:
     st.write("**소상공인시장진흥공단 상가(상권)정보 Open API**로 특정 위치 반경 내 실제 점포(상가업소) 목록을 조회합니다. "
@@ -1287,7 +1254,7 @@ with tab_sangkwon:
                 render_address_map(map_df, label_col="표시", vworld_key=vworld_key, highlight_lat=lat, highlight_lon=lon)
 
 # ------------------------------------------------------------------
-# 탭 12: 서울 상권분석 (서울 열린데이터광장 우리마을가게 상권분석서비스 Open API)
+# 탭 11: 서울 상권분석 (서울 열린데이터광장 우리마을가게 상권분석서비스 Open API)
 # ------------------------------------------------------------------
 with tab_seoul:
     st.write("**서울 열린데이터광장 우리마을가게 상권분석서비스**로 서울시 상권의 추정매출·점포 현황·생활인구·직장인구를 조회합니다. "
@@ -1432,7 +1399,7 @@ with tab_seoul:
             render_address_map(map_df, label_col="표시", vworld_key=vworld_key, highlight_lat=lat, highlight_lon=lon)
 
 # ------------------------------------------------------------------
-# 탭 13: 자동 pptx 리포트 (주소 하나로 실제 데이터를 채운 부동산 분석 리포트 생성)
+# 탭 12: 자동 pptx 리포트 (주소 하나로 실제 데이터를 채운 부동산 분석 리포트 생성)
 # ------------------------------------------------------------------
 with tab_autopptx:
     st.write(
