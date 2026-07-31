@@ -18,6 +18,7 @@ import os
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from PublicDataReader import BuildingLedger, TransactionPrice
 
 from building_example import (
@@ -1453,19 +1454,42 @@ with tab_autopptx:
     result = st.session_state.get("autopptx_result")
     if result:
         addr_label, pptx_bytes = result
-        st.caption(f"'{addr_label}' 리포트")
+        st.caption(f"'{addr_label}' 리포트 ({len(pptx_bytes) / 1024:.0f} KB)")
         # st.download_button은 Streamlit이 내부 /media/<id> URL로 파일을 서빙하고 브라우저가
-        # 응답의 Content-Disposition 헤더를 읽어 파일명을 정하는 방식인데, Streamlit Community
-        # Cloud에서는 이 헤더가 아예 안 실려서(확장자도 안 붙음) 다운로드가 임의의 UUID 이름으로
-        # 저장돼버린다. data: URI + <a download>는 파일을 페이지 안에 통째로 내장해서 서버 응답
-        # 헤더에 의존하지 않으므로 이 문제를 완전히 우회한다.
+        # 응답의 Content-Disposition 헤더를 읽어 파일명을 정하는데, Streamlit Community Cloud에서는
+        # 이 헤더가 아예 안 실려서(확장자도 안 붙음) 임의의 UUID 이름으로 저장돼버렸다.
+        # data: URI(<a download>)로 우회를 시도했지만, 이번엔 브라우저의 data: URI 길이 제한
+        # (~2MB, base64라 실제 파일 크기의 1.33배)에 리포트(2~3MB급)가 걸려 링크 자체가 깨졌다.
+        # 그래서 길이 제한이 없는 Blob URL(URL.createObjectURL)로 다시 우회한다 — 이것도 서버
+        # 응답 헤더와 무관하고, data: URI와 달리 파일 크기 제약이 사실상 없다.
         file_name = f"realestate_analysis_report_{datetime.datetime.now():%Y%m%d_%H%M%S}.pptx"
         b64 = base64.b64encode(pptx_bytes).decode()
-        st.markdown(
-            f'<a href="data:application/vnd.openxmlformats-officedocument.presentationml.presentation;base64,{b64}" '
-            f'download="{file_name}" '
-            f'style="display:block;box-sizing:border-box;width:100%;padding:0.55rem 1rem;'
-            f'background-color:#FF4B4B;color:#FFFFFF;border-radius:0.5rem;text-align:center;'
-            f'text-decoration:none;font-weight:600;">📥 pptx 다운로드</a>',
-            unsafe_allow_html=True,
+        components.html(
+            f"""
+            <button id="pptx-dl-btn" style="display:block;box-sizing:border-box;width:100%;
+                padding:0.55rem 1rem;background-color:#FF4B4B;color:#FFFFFF;border:none;
+                border-radius:0.5rem;text-align:center;font-weight:600;font-size:1rem;
+                font-family:inherit;cursor:pointer;">📥 pptx 다운로드</button>
+            <script>
+              const b64 = "{b64}";
+              const byteChars = atob(b64);
+              const byteNumbers = new Uint8Array(byteChars.length);
+              for (let i = 0; i < byteChars.length; i++) {{
+                byteNumbers[i] = byteChars.charCodeAt(i);
+              }}
+              const blob = new Blob([byteNumbers], {{
+                type: "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+              }});
+              const url = URL.createObjectURL(blob);
+              document.getElementById("pptx-dl-btn").addEventListener("click", () => {{
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = "{file_name}";
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+              }});
+            </script>
+            """,
+            height=52,
         )
