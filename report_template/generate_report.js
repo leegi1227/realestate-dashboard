@@ -12,14 +12,16 @@
 const pptxgen = require("pptxgenjs");
 
 // ------------------------------------------------------------------
-// 색상 팔레트 (부동산/건축 톤 — 네이비 우세 + 테라코타 포인트)
+// 색상 팔레트 — 딥 네이비 베이스 + 비비드(인디고→핑크) 포인트
+// (report_generator.py 라이브 리포트와 통일. pptxgenjs는 그라데이션 채우기를
+// 지원하지 않아 여기서는 포인트 컬러를 그 그라데이션의 중간톤인 단색 퍼플로 둔다.)
 // ------------------------------------------------------------------
-const NAVY = "1E2A44";
-const NAVY_DARK = "141D33";
-const NAVY_LIGHT = "2E3D5C";
+const NAVY = "16213E";
+const NAVY_DARK = "0B1220";
+const NAVY_LIGHT = "2A395C";
 const ICE = "E8ECF2";
-const TERRACOTTA = "C1652F";
-const TERRACOTTA_LIGHT = "E8C4AE";
+const TERRACOTTA = "A855F7";
+const TERRACOTTA_LIGHT = "E8D9FA";
 const WHITE = "FFFFFF";
 const TEXT_DARK = "22262E";
 const MUTED = "6B7280";
