@@ -35,6 +35,7 @@ from pptx.oxml.ns import qn
 
 from building_example import (
     analyze_seismic_risk,
+    analyze_seoul_trade_area_detail,
     build_executive_summary,
     build_master_report,
     combine_zoning_sources,
@@ -670,6 +671,68 @@ def _seoul_detail_slide(prs, data):
     _page_footer(slide, data["address"], "서울 상권 상세")
 
 
+def _seoul_detail_slide2(prs, data):
+    """서울 상권 상세의 두 번째 슬라이드 — 성별·연령대·주중/주말 소비자 특성 +
+
+    점포 개폐업 현황 + data.seoul.go.kr 데이터 기반 규칙형 인사이트. 첫 슬라이드가
+    총괄·업종·요일별 매출을 다뤘다면, 이 슬라이드는 '누가, 언제, 어떤 강도로'
+    소비하는 상권인지를 보여준다.
+    """
+    sd = data.get("seoul_trade_area")
+    if not sd or not (sd.get("store") or sd.get("age") or sd.get("gender") or sd.get("insights")):
+        return
+    slide = _new_slide(prs)
+    _section_title(slide, f"서울 상권 상세 — 소비자 특성 및 점포 ({sd.get('name', '')})")
+
+    store = sd.get("store") or {}
+    cards = [
+        ("총점포수", store.get("총점포수"), "개"),
+        ("프랜차이즈점포수", store.get("프랜차이즈점포수"), "개"),
+        ("개업률", store.get("개업률(%)"), "%"),
+        ("폐업률", store.get("폐업률(%)"), "%"),
+    ]
+    cards = [c for c in cards if c[1] is not None]
+    if cards:
+        cols, gap = len(cards), 0.2
+        card_w = (12.1 - gap * (cols - 1)) / cols
+        for i, (label, val, unit) in enumerate(cards):
+            x = 0.6 + i * (card_w + gap)
+            value_str = f"{val:,.0f}{unit}" if unit == "개" else f"{val}{unit}"
+            _stat_card(slide, x, 1.3, card_w, 1.1, value_str, label)
+
+    age = sd.get("age") or []
+    if age:
+        _textbox(slide, 0.6, 2.7, 5.6, 0.35, "연령대별 매출 비중(%)", size=13, bold=True, color=NAVY)
+        chart = _bar_chart(slide, 0.6, 3.1, 5.6, 3.4, [a["label"] for a in age], [a["value"] for a in age],
+                            TERRACOTTA, num_fmt="0.0")
+        _gradient_fill(chart.plots[0].series[0].format, angle=0)
+
+    gender = sd.get("gender") or {}
+    weekend = sd.get("weekend_mix") or {}
+    y = 2.7
+    if gender:
+        _textbox(slide, 6.6, y, 6.1, 0.3, "성별 매출 비중", size=13, bold=True, color=NAVY)
+        _textbox(slide, 6.6, y + 0.35, 6.1, 0.5,
+                 f"남성 {gender['남성비율(%)']:.0f}%   ·   여성 {gender['여성비율(%)']:.0f}%",
+                 size=14, color=TEXT_DARK)
+        y += 0.95
+    if weekend:
+        _textbox(slide, 6.6, y, 6.1, 0.3, "주중/주말 매출 비중", size=13, bold=True, color=NAVY)
+        _textbox(slide, 6.6, y + 0.35, 6.1, 0.5,
+                 f"주중 {weekend['주중비율(%)']:.0f}%   ·   주말 {weekend['주말비율(%)']:.0f}%",
+                 size=14, color=TEXT_DARK)
+        y += 0.95
+
+    insights = sd.get("insights") or []
+    if insights:
+        _textbox(slide, 6.6, y + 0.1, 6.1, 0.3, "🔎 자동 인사이트", size=13, bold=True, color=NAVY)
+        y += 0.5
+        for line in insights[:4]:
+            _textbox(slide, 6.6, y, 6.1, 0.5, f"• {line}", size=11, color=TEXT_DARK, line_spacing=1.2)
+            y += 0.5
+    _page_footer(slide, data["address"], "서울 상권 상세")
+
+
 def _growth_drivers_slide(prs, data):
     items = data.get("growth_drivers") or []
     if not items:
@@ -846,6 +909,9 @@ def _slide_plan(data):
         (2, "반경 상가업소 상세", _nearby_stores_detail_slide) if com.get("store_list") else None,
         (2, "상권영역 지도", _trade_area_map_slide) if data.get("trade_area_map") else None,
         (2, "서울 상권 상세", _seoul_detail_slide) if data.get("seoul_trade_area") else None,
+        (2, "서울 상권 상세 — 소비자 특성", _seoul_detail_slide2)
+        if (data.get("seoul_trade_area") or {}).get("insights") or (data.get("seoul_trade_area") or {}).get("age")
+        else None,
         (3, "개발호재 종합", _growth_drivers_slide) if data.get("growth_drivers") else None,
         (3, "SWOT 분석", _swot_slide) if any(swot.get(k) for k in ("strengths", "weaknesses", "opportunities", "threats")) else None,
         (3, "핵심지표 종합 비교표", _key_metrics_table_slide),
@@ -1145,7 +1211,6 @@ def _build_seoul(seoul_key, lon, lat):
         trdar_row, dist_m = find_nearest_seoul_trade_area(locations_df, lon, lat)
         if dist_m > 1500:
             return None, None, f"가장 가까운 서울시 상권이 {dist_m:.0f}m 떨어져 있어(1.5km 초과) 매칭하지 않음"
-        trdar_cd = trdar_row["TRDAR_CD"]
         name = trdar_row["TRDAR_CD_NM"]
 
         selng_df, _ = get_seoul_trade_area_quarter_dataset(seoul_key, SEOUL_TRDAR_SALES_SERVICE)
@@ -1153,37 +1218,42 @@ def _build_seoul(seoul_key, lon, lat):
         flpop_df, _ = get_seoul_trade_area_quarter_dataset(seoul_key, SEOUL_TRDAR_FLPOP_SERVICE)
         wrc_df, _ = get_seoul_trade_area_quarter_dataset(seoul_key, SEOUL_TRDAR_WRC_POPLTN_SERVICE)
 
-        sel = selng_df[selng_df["TRDAR_CD"] == trdar_cd].copy() if selng_df is not None and not selng_df.empty else pd.DataFrame()
-        flp = flpop_df[flpop_df["TRDAR_CD"] == trdar_cd] if flpop_df is not None and not flpop_df.empty else pd.DataFrame()
-        wrc = wrc_df[wrc_df["TRDAR_CD"] == trdar_cd] if wrc_df is not None and not wrc_df.empty else pd.DataFrame()
+        detail = analyze_seoul_trade_area_detail(trdar_row, selng_df, stor_df, flpop_df, wrc_df)
+        s = detail["총괄"]
 
         stats = []
-        if not sel.empty:
-            total_sales = pd.to_numeric(sel["THSMON_SELNG_AMT"], errors="coerce").sum()
-            stats.append({"label": "추정매출 (당월)", "value": f"{total_sales / 1e8:,.1f}억원"})
-        if not flp.empty:
-            total_flpop = pd.to_numeric(flp["TOT_FLPOP_CO"], errors="coerce").sum()
-            stats.append({"label": "생활인구 (분기)", "value": f"{total_flpop:,.0f}명"})
-        if not wrc.empty:
-            total_wrc = pd.to_numeric(wrc["TOT_WRC_POPLTN_CO"], errors="coerce").sum()
-            stats.append({"label": "직장인구 (분기)", "value": f"{total_wrc:,.0f}명"})
+        if s["추정매출(원)"]:
+            stats.append({"label": "추정매출 (당월)", "value": f"{s['추정매출(원)'] / 1e8:,.1f}억원"})
+        if s["생활인구"] is not None:
+            stats.append({"label": "생활인구 (분기)", "value": f"{s['생활인구']:,.0f}명"})
+        if s["직장인구"] is not None:
+            stats.append({"label": "직장인구 (분기)", "value": f"{s['직장인구']:,.0f}명"})
 
         top_industries = []
         weekday = []
-        if not sel.empty:
-            sel["THSMON_SELNG_AMT"] = pd.to_numeric(sel["THSMON_SELNG_AMT"], errors="coerce")
-            top5 = sel.sort_values("THSMON_SELNG_AMT", ascending=False).head(5)
-            top_industries = [[r["SVC_INDUTY_CD_NM"], f"{r['THSMON_SELNG_AMT'] / 1e8:.1f}억"] for _, r in top5.iterrows()]
-            day_cols = [
-                ("MON_SELNG_AMT", "월"), ("TUES_SELNG_AMT", "화"), ("WED_SELNG_AMT", "수"), ("THUR_SELNG_AMT", "목"),
-                ("FRI_SELNG_AMT", "금"), ("SAT_SELNG_AMT", "토"), ("SUN_SELNG_AMT", "일"),
+        if not detail["업종별"].empty:
+            top5 = detail["업종별"].head(5)
+            top_industries = [
+                [r["SVC_INDUTY_CD_NM"], f"{r['THSMON_SELNG_AMT'] / 1e8:.1f}억"] for _, r in top5.iterrows()
             ]
+        if not detail["요일별매출"].empty:
             weekday = [
-                {"label": label, "value": round(pd.to_numeric(sel[col], errors="coerce").sum() / 1e8, 1)}
-                for col, label in day_cols if col in sel.columns
+                {"label": r["요일"], "value": r["매출액(억원)"]} for _, r in detail["요일별매출"].iterrows()
             ]
 
-        seoul_detail = {"name": name, "stats": stats, "top_industries": top_industries, "weekday": weekday}
+        gender = detail["성별매출"]
+        age_df = detail["연령대별매출"]
+        age = [
+            {"label": r["연령대"], "value": r["비율(%)"]} for _, r in age_df.iterrows()
+        ] if not age_df.empty else []
+        weekend_mix = detail["주중주말매출"]
+        store = detail["점포"]
+
+        seoul_detail = {
+            "name": name, "stats": stats, "top_industries": top_industries, "weekday": weekday,
+            "gender": gender, "age": age, "weekend_mix": weekend_mix, "store": store,
+            "insights": detail["인사이트"],
+        }
         trade_area_map = {"name": name, "lat": trdar_row["lat"], "lon": trdar_row["lon"]}
         return seoul_detail, trade_area_map, None
     except Exception as e:

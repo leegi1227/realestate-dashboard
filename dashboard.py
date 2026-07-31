@@ -25,9 +25,12 @@ from building_example import (
     add_coordinates_column,
     add_pyeong_columns,
     add_standard_price_column,
+    analyze_district_price_stats,
     analyze_district_stats,
     analyze_old_buildings,
     analyze_price_history,
+    analyze_seoul_trade_area_detail,
+    analyze_transaction_stats,
     generate_pdf_report,
     geocode_address_kakao,
     get_bdong_code_map,
@@ -50,7 +53,6 @@ from building_example import (
     SEOUL_TRDAR_STORE_SERVICE,
     SEOUL_TRDAR_FLPOP_SERVICE,
     SEOUL_TRDAR_WRC_POPLTN_SERVICE,
-    resolve_dong_code,
     reverse_match_transactions,
     split_common_and_varying,
 )
@@ -255,6 +257,25 @@ def _load_district_titles(service_key: str, sigungu_code: str, bdong_code: str):
     )
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def _load_district_prices(service_key: str, sigungu_code: str, bdong_code: str):
+    """동 전체 주택가격(공시가격)을 15분 캐시. bun/ji 없이 호출하면 표제부 전체 수집과
+
+    동일한 방식(동 단위 페이지네이션)으로 동 전체 호(관리건축물대장PK)의 공시가격 이력을
+    한 번에 받아온다 — 필지별로 API를 반복 호출하지 않는다. 아파트 등은 건물 1개에 호가
+    수십~수백 개라 표제부보다 행 수가 훨씬 많을 수 있어 max_rows를 더 넉넉히 둔다.
+    """
+    api = BuildingLedger(service_key)
+    return get_building_ledger(
+        api,
+        ledger_type="주택가격",
+        sigungu_code=sigungu_code,
+        bdong_code=bdong_code,
+        max_rows=20000,
+        wait_time=0.15,
+    )
+
+
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
 def _load_seoul_trade_area_locations(seoul_key: str):
     """서울시 전체 상권(약 1,650개) 위치 정보를 6시간 캐시 (매 요청마다 다시 받기엔 무겁다)."""
@@ -393,8 +414,23 @@ with st.sidebar:
     )
     seoul_key = seoul_key.strip() if seoul_key else None
 
-    address = st.text_input("주소 (시/군/구 + 동)", value="서울시 강남구 역삼동",
-                             help="코드를 몰라도 동 이름으로 자동 검색됩니다.")
+    st.caption("주소 (서울특별시 + 구 + 동)")
+    _addr_sigungu_df = _load_sigungu_list()
+    _addr_seoul_gu_df = _addr_sigungu_df[_addr_sigungu_df["시도명"] == "서울특별시"].reset_index(drop=True)
+    _addr_gu_options = _addr_seoul_gu_df["시군구명"].tolist()
+    addr_gu = st.selectbox(
+        "구", _addr_gu_options,
+        index=_addr_gu_options.index("강남구") if "강남구" in _addr_gu_options else 0,
+        key="addr_gu",
+    )
+    addr_sigungu_code = _addr_seoul_gu_df.loc[_addr_seoul_gu_df["시군구명"] == addr_gu, "시군구코드"].iloc[0]
+    _addr_dong_options = _load_dong_list(addr_sigungu_code)
+    addr_dong = st.selectbox(
+        "동", _addr_dong_options,
+        index=_addr_dong_options.index("역삼동") if "역삼동" in _addr_dong_options else 0,
+        key="addr_dong",
+    )
+    st.caption(f"📍 서울특별시 {addr_gu} {addr_dong}")
 
     col1, col2 = st.columns(2)
     bun = col1.text_input("번(본번)", value="237")
@@ -404,12 +440,15 @@ with st.sidebar:
 
 
 def _resolve_codes():
-    sigungu_code, bdong_code, row = resolve_dong_code(address)
+    bdong_map = get_bdong_code_map(addr_sigungu_code)
+    bdong_code = bdong_map.get(addr_dong)
+    if not bdong_code:
+        raise ValueError(f"'서울특별시 {addr_gu} {addr_dong}'의 법정동코드를 찾지 못했습니다.")
     st.success(
-        f"인식된 주소: {row['시도명']} {row['시군구명']} {row['동명']} "
-        f"(시군구코드={sigungu_code}, 법정동코드={bdong_code})"
+        f"인식된 주소: 서울특별시 {addr_gu} {addr_dong} "
+        f"(시군구코드={addr_sigungu_code}, 법정동코드={bdong_code})"
     )
-    return sigungu_code, bdong_code, row["시도명"], row["시군구명"]
+    return addr_sigungu_code, bdong_code, "서울특별시", addr_gu
 
 
 tab_single, tab_report, tab_price, tab_district, tab_old, tab_priceh, tab_map, tab_geocode, tab_commercial, tab_sangkwon, tab_seoul, tab_autopptx = st.tabs([
@@ -759,6 +798,28 @@ with tab_price:
                 st.caption(f"좌표가 확인된 {len(map_df)}/{len(tp_df)}건을 표시합니다.")
                 render_address_map(map_df, lat_col="위도", lon_col="경도", label_col="주소", vworld_key=vworld_key)
 
+        tx_stats = analyze_transaction_stats(tp_df)
+        if tx_stats["총괄"]:
+            scope_label = f"{tp_sigungu_name} {tp_dong}" if tp_dong != "(전체)" else tp_sigungu_name
+            st.subheader(f"📊 {scope_label} 주변통계")
+            st.caption("이미 조회된 거래 내역만 집계한 것으로, 추가 API 호출 없이 즉시 계산됩니다.")
+            s = tx_stats["총괄"]
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("건수", f"{s['건수']:,}")
+            c2.metric("평균 거래가", f"{s['평균거래가(억)']:.2f}억")
+            c3.metric("중앙값 거래가", f"{s['중앙값거래가(억)']:.2f}억")
+            c4.metric("최고가 / 최저가", f"{s['최고가(억)']:.2f}억 / {s['최저가(억)']:.2f}억")
+            if "평균평당가(만원)" in s:
+                c5, c6 = st.columns(2)
+                c5.metric("평균 평당가", f"{s['평균평당가(만원)']:,.0f}만원" if s["평균평당가(만원)"] is not None else "-")
+                c6.metric("평균 면적", f"{s['평균면적(평)']}평")
+            if not tx_stats["유형별"].empty:
+                st.markdown("**구분별 평균 거래가**")
+                st.dataframe(tx_stats["유형별"], width='stretch')
+            if not tx_stats["연월별추이"].empty:
+                st.markdown("**연월별 평균 거래가 추이**")
+                st.line_chart(tx_stats["연월별추이"].set_index("연월")["평균거래가(억)"])
+
 # ------------------------------------------------------------------
 # 탭 4: 동단위 통계
 # ------------------------------------------------------------------
@@ -868,6 +929,57 @@ with tab_priceh:
                 f"총증감 {unit['총증감률(%)']}% · 연평균(CAGR) {unit['연평균상승률CAGR(%)']}%"
             )
             st.line_chart(unit["추이"].set_index("연도"))
+
+    st.divider()
+    st.subheader("🏘️ 동단위 공시가격 주변분석")
+    st.caption(
+        "동 전체 호(관리건축물대장PK)의 공시가격을 한 번에 불러와 분포·통계를 봅니다. "
+        "필지별로 API를 반복 호출하지 않아 표제부 전체 수집과 비슷한 속도이며(첫 조회는 20~40초 정도 "
+        "걸릴 수 있고, 이후 15분간 캐시되어 즉시 응답), 사이드바의 번지는 무시하고 동 전체를 봅니다."
+    )
+    if st.button("동단위 공시가격 분석", type="primary", key="priceh_district_submit"):
+        if not service_key:
+            st.error("서비스키를 입력해주세요.")
+        else:
+            try:
+                with st.spinner("주소를 코드로 변환하는 중..."):
+                    sigungu_code, bdong_code, addr_sido, addr_sigungu_name = _resolve_codes()
+                with st.spinner("동 전체 공시가격 수집 중... (캐시되어 있으면 즉시 완료)"):
+                    district_price_df = _load_district_prices(service_key, sigungu_code, bdong_code)
+
+                subject_price_eok = None
+                ph_now = st.session_state.get("price_history")
+                if ph_now and ph_now.get("단위목록"):
+                    subject_price_eok = ph_now["단위목록"][0]["최신가격"] / 1e8
+
+                st.session_state.district_price_stats = analyze_district_price_stats(
+                    district_price_df, subject_price_eok=subject_price_eok,
+                )
+            except Exception as e:
+                st.error(f"조회 실패: {e}")
+                st.session_state.district_price_stats = None
+
+    dps = st.session_state.get("district_price_stats")
+    if not dps or not dps.get("총괄"):
+        st.info("**동단위 공시가격 분석** 버튼을 눌러주세요.")
+    else:
+        st.warning(dps["경고"])
+        s = dps["총괄"]
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("호수(유닛수)", f"{s['호수(유닛수)']:,}")
+        c2.metric("평균 공시가격", f"{s['평균공시가격(억)']:.2f}억")
+        c3.metric("중앙값 공시가격", f"{s['중앙값공시가격(억)']:.2f}억")
+        c4.metric("최고 / 최저", f"{s['최고공시가격(억)']:.2f}억 / {s['최저공시가격(억)']:.2f}억")
+        st.caption(f"기준연도: {s['기준연도']}")
+
+        if dps["백분위"] is not None:
+            st.info(
+                f"📍 사이드바에 입력한 필지(번지 {bun}-{ji})의 최고가 호 공시가격 기준으로, "
+                f"이 동 전체 분포에서 하위 {dps['백분위']}% 지점에 해당합니다."
+            )
+
+        st.markdown("**공시가격 구간 분포**")
+        st.dataframe(dps["가격구간분포"], width='stretch')
 
 # ------------------------------------------------------------------
 # 탭 7: 지도 업로드 — 주소·위도·경도가 담긴 파일을 올리면 지도에 표시
@@ -1268,45 +1380,60 @@ with tab_seoul:
         def _fmt_seoul_quarter(q):
             return f"{q[:4]}년 {q[4:]}분기"
 
-        seoul_addr = st.text_input(
-            "주소", placeholder="예: 서울특별시 마포구 연남동 227-1", key="seoul_addr",
+        st.caption("주소 (서울특별시 + 구 + 동 + 번지)")
+        _seoul_sigungu_df = _load_sigungu_list()
+        _seoul_gu_df = _seoul_sigungu_df[_seoul_sigungu_df["시도명"] == "서울특별시"].reset_index(drop=True)
+        _seoul_gu_options = _seoul_gu_df["시군구명"].tolist()
+        col_gu, col_dong, col_bun = st.columns([1, 1, 1])
+        seoul_gu = col_gu.selectbox(
+            "구", _seoul_gu_options,
+            index=_seoul_gu_options.index(addr_gu) if addr_gu in _seoul_gu_options else 0,
+            key="seoul_gu",
+        )
+        seoul_sigungu_code = _seoul_gu_df.loc[_seoul_gu_df["시군구명"] == seoul_gu, "시군구코드"].iloc[0]
+        _seoul_dong_options = _load_dong_list(seoul_sigungu_code)
+        seoul_dong = col_dong.selectbox(
+            "동", _seoul_dong_options,
+            index=_seoul_dong_options.index(addr_dong) if addr_dong in _seoul_dong_options else 0,
+            key="seoul_dong",
+        )
+        seoul_bun = col_bun.text_input(
+            "번지 (선택)", value="", placeholder="예: 227-1", key="seoul_bun",
+            help="비워두면 동 중심 좌표로 상권을 찾습니다.",
         )
 
         if st.button("상권 찾기", type="primary", key="seoul_submit"):
-            addr = seoul_addr.strip()
-            if not addr:
-                st.warning("주소를 입력해주세요.")
+            addr = f"서울특별시 {seoul_gu} {seoul_dong} {seoul_bun.strip()}".strip()
+            with st.spinner("주소 좌표 변환 중..."):
+                coord, reason = geocode_address_kakao(kakao_key, addr)
+            if not coord:
+                st.error(f"좌표를 찾지 못했습니다 ({reason}).")
+                st.session_state.seoul_result = None
             else:
-                with st.spinner("주소 좌표 변환 중..."):
-                    coord, reason = geocode_address_kakao(kakao_key, addr)
-                if not coord:
-                    st.error(f"좌표를 찾지 못했습니다 ({reason}).")
-                    st.session_state.seoul_result = None
-                else:
-                    lon, lat = coord
-                    try:
-                        with st.spinner("서울시 상권 위치 데이터를 불러오는 중... (최초 1회, 최대 1분 정도 걸릴 수 있습니다)"):
-                            locations_df = _load_seoul_trade_area_locations(seoul_key)
+                lon, lat = coord
+                try:
+                    with st.spinner("서울시 상권 위치 데이터를 불러오는 중... (최초 1회, 최대 1분 정도 걸릴 수 있습니다)"):
+                        locations_df = _load_seoul_trade_area_locations(seoul_key)
 
-                        if locations_df.empty:
-                            st.error("서울시 상권 위치 데이터를 가져오지 못했습니다. 인증키를 확인해주세요.")
-                            st.session_state.seoul_result = None
-                        else:
-                            trdar_row, distance_m = find_nearest_seoul_trade_area(locations_df, lon, lat)
-
-                            with st.spinner("추정매출·점포·생활인구·직장인구 데이터를 불러오는 중... (최초 1회, 최대 1분 정도 걸릴 수 있습니다)"):
-                                selng_df, selng_q = _load_seoul_quarter_dataset(seoul_key, SEOUL_TRDAR_SALES_SERVICE)
-                                stor_df, stor_q = _load_seoul_quarter_dataset(seoul_key, SEOUL_TRDAR_STORE_SERVICE)
-                                flpop_df, flpop_q = _load_seoul_quarter_dataset(seoul_key, SEOUL_TRDAR_FLPOP_SERVICE)
-                                wrc_df, wrc_q = _load_seoul_quarter_dataset(seoul_key, SEOUL_TRDAR_WRC_POPLTN_SERVICE)
-
-                            st.session_state.seoul_result = (
-                                addr, lon, lat, trdar_row, distance_m,
-                                selng_df, selng_q, stor_df, stor_q, flpop_df, flpop_q, wrc_df, wrc_q,
-                            )
-                    except RuntimeError as e:
-                        st.error(str(e))
+                    if locations_df.empty:
+                        st.error("서울시 상권 위치 데이터를 가져오지 못했습니다. 인증키를 확인해주세요.")
                         st.session_state.seoul_result = None
+                    else:
+                        trdar_row, distance_m = find_nearest_seoul_trade_area(locations_df, lon, lat)
+
+                        with st.spinner("추정매출·점포·생활인구·직장인구 데이터를 불러오는 중... (최초 1회, 최대 1분 정도 걸릴 수 있습니다)"):
+                            selng_df, selng_q = _load_seoul_quarter_dataset(seoul_key, SEOUL_TRDAR_SALES_SERVICE)
+                            stor_df, stor_q = _load_seoul_quarter_dataset(seoul_key, SEOUL_TRDAR_STORE_SERVICE)
+                            flpop_df, flpop_q = _load_seoul_quarter_dataset(seoul_key, SEOUL_TRDAR_FLPOP_SERVICE)
+                            wrc_df, wrc_q = _load_seoul_quarter_dataset(seoul_key, SEOUL_TRDAR_WRC_POPLTN_SERVICE)
+
+                        st.session_state.seoul_result = (
+                            addr, lon, lat, trdar_row, distance_m,
+                            selng_df, selng_q, stor_df, stor_q, flpop_df, flpop_q, wrc_df, wrc_q,
+                        )
+                except RuntimeError as e:
+                    st.error(str(e))
+                    st.session_state.seoul_result = None
 
         result = st.session_state.get("seoul_result")
         if result:
@@ -1323,41 +1450,34 @@ with tab_seoul:
                 f"약 {distance_m:,.0f}m)"
             )
 
-            sel = selng_df[selng_df["TRDAR_CD"] == trdar_cd].copy() if not selng_df.empty else pd.DataFrame()
-            sto = stor_df[stor_df["TRDAR_CD"] == trdar_cd].copy() if not stor_df.empty else pd.DataFrame()
-            flp = flpop_df[flpop_df["TRDAR_CD"] == trdar_cd] if not flpop_df.empty else pd.DataFrame()
-            wrc = wrc_df[wrc_df["TRDAR_CD"] == trdar_cd] if not wrc_df.empty else pd.DataFrame()
-
-            total_sales = pd.to_numeric(sel["THSMON_SELNG_AMT"], errors="coerce").sum() if not sel.empty else 0
-            total_stores = pd.to_numeric(sto["STOR_CO"], errors="coerce").sum() if not sto.empty else 0
-            total_flpop = pd.to_numeric(flp["TOT_FLPOP_CO"], errors="coerce").sum() if not flp.empty else None
-            total_wrc = pd.to_numeric(wrc["TOT_WRC_POPLTN_CO"], errors="coerce").sum() if not wrc.empty else None
+            detail = analyze_seoul_trade_area_detail(trdar_row, selng_df, stor_df, flpop_df, wrc_df)
+            s = detail["총괄"]
 
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric(f"추정매출 ({_fmt_seoul_quarter(selng_q)})", f"{total_sales / 1e8:,.1f}억원" if total_sales else "-")
-            c2.metric(f"점포 수 ({_fmt_seoul_quarter(stor_q)})", f"{total_stores:,.0f}개" if total_stores else "-")
-            c3.metric(f"생활인구 ({_fmt_seoul_quarter(flpop_q)})", f"{total_flpop:,.0f}명" if total_flpop is not None else "-")
-            c4.metric(f"직장인구 ({_fmt_seoul_quarter(wrc_q)})", f"{total_wrc:,.0f}명" if total_wrc is not None else "-")
+            c1.metric(f"추정매출 ({_fmt_seoul_quarter(selng_q)})",
+                      f"{s['추정매출(원)'] / 1e8:,.1f}억원" if s["추정매출(원)"] else "-")
+            c2.metric(f"점포 수 ({_fmt_seoul_quarter(stor_q)})",
+                      f"{s['점포수']:,.0f}개" if s["점포수"] else "-")
+            c3.metric(f"생활인구 ({_fmt_seoul_quarter(flpop_q)})",
+                      f"{s['생활인구']:,.0f}명" if s["생활인구"] is not None else "-")
+            c4.metric(f"직장인구 ({_fmt_seoul_quarter(wrc_q)})",
+                      f"{s['직장인구']:,.0f}명" if s["직장인구"] is not None else "-")
 
-            if sel.empty:
+            if detail["인사이트"]:
+                st.markdown("**🔎 자동 인사이트**")
+                for line in detail["인사이트"]:
+                    st.markdown(f"- {line}")
+
+            if detail["업종별"].empty:
                 st.info(f"{_fmt_seoul_quarter(selng_q)} 추정매출 데이터가 없습니다.")
             else:
                 st.subheader("📊 업종별 매출·점포 현황")
-                merged = sel[["SVC_INDUTY_CD", "SVC_INDUTY_CD_NM", "THSMON_SELNG_AMT", "THSMON_SELNG_CO"]].copy()
-                if not sto.empty:
-                    merged = merged.merge(
-                        sto[["SVC_INDUTY_CD", "STOR_CO", "OPBIZ_RT", "CLSBIZ_RT"]],
-                        on="SVC_INDUTY_CD", how="left",
-                    )
-                for col in ["THSMON_SELNG_AMT", "THSMON_SELNG_CO", "STOR_CO", "OPBIZ_RT", "CLSBIZ_RT"]:
-                    if col in merged.columns:
-                        merged[col] = pd.to_numeric(merged[col], errors="coerce")
-                merged = merged.sort_values("THSMON_SELNG_AMT", ascending=False)
-
                 display_cols = {
                     "SVC_INDUTY_CD_NM": "업종", "THSMON_SELNG_AMT": "매출액(원)", "THSMON_SELNG_CO": "매출건수",
                     "STOR_CO": "점포수", "OPBIZ_RT": "개업률(%)", "CLSBIZ_RT": "폐업률(%)",
+                    "FRC_STOR_CO": "프랜차이즈점포수", "SIMILR_INDUTY_STOR_CO": "유사업종점포수",
                 }
+                merged = detail["업종별"]
                 show_cols = [c for c in display_cols if c in merged.columns]
                 st.dataframe(merged[show_cols].rename(columns=display_cols), width='stretch', hide_index=True)
 
@@ -1367,30 +1487,76 @@ with tab_seoul:
                     key="seoul_csv",
                 )
 
+                st.subheader("🧑‍🤝‍🧑 매출 구성 — 성별 · 연령대 · 주중/주말")
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    st.caption("성별 매출 비중")
+                    gm = detail["성별매출"]
+                    if gm:
+                        st.bar_chart(pd.Series({"남성": gm["남성비율(%)"], "여성": gm["여성비율(%)"]}))
+                    else:
+                        st.caption("데이터 없음")
+                with c2:
+                    st.caption("연령대별 매출 비중(%)")
+                    age_df = detail["연령대별매출"]
+                    if not age_df.empty:
+                        st.bar_chart(age_df.set_index("연령대")["비율(%)"])
+                    else:
+                        st.caption("데이터 없음")
+                with c3:
+                    st.caption("주중/주말 매출 비중")
+                    wm = detail["주중주말매출"]
+                    if wm:
+                        st.bar_chart(pd.Series({"주중": wm["주중비율(%)"], "주말": wm["주말비율(%)"]}))
+                    else:
+                        st.caption("데이터 없음")
+
                 c1, c2 = st.columns(2)
                 with c1:
-                    st.caption("요일별 매출 (업종 전체 합계)")
-                    day_cols = {
-                        "MON_SELNG_AMT": "월", "TUES_SELNG_AMT": "화", "WED_SELNG_AMT": "수", "THUR_SELNG_AMT": "목",
-                        "FRI_SELNG_AMT": "금", "SAT_SELNG_AMT": "토", "SUN_SELNG_AMT": "일",
-                    }
-                    day_sums = pd.Series({
-                        label: pd.to_numeric(sel[col], errors="coerce").sum()
-                        for col, label in day_cols.items() if col in sel.columns
-                    })
-                    st.bar_chart(day_sums)
+                    st.caption("요일별 매출 (억원)")
+                    if not detail["요일별매출"].empty:
+                        st.bar_chart(detail["요일별매출"].set_index("요일")["매출액(억원)"])
                 with c2:
-                    st.caption("시간대별 매출 (업종 전체 합계)")
-                    tz_cols = {
-                        "TMZON_00_06_SELNG_AMT": "00~06", "TMZON_06_11_SELNG_AMT": "06~11",
-                        "TMZON_11_14_SELNG_AMT": "11~14", "TMZON_14_17_SELNG_AMT": "14~17",
-                        "TMZON_17_21_SELNG_AMT": "17~21", "TMZON_21_24_SELNG_AMT": "21~24",
-                    }
-                    tz_sums = pd.Series({
-                        label: pd.to_numeric(sel[col], errors="coerce").sum()
-                        for col, label in tz_cols.items() if col in sel.columns
-                    })
-                    st.bar_chart(tz_sums)
+                    st.caption("시간대별 매출 (억원)")
+                    if not detail["시간대별매출"].empty:
+                        st.bar_chart(detail["시간대별매출"].set_index("시간대")["매출액(억원)"])
+
+            store = detail["점포"]
+            if store:
+                st.subheader("🏪 점포 개폐업 현황")
+                store_cols = st.columns(4)
+                labels_units = [
+                    ("총점포수", "개"), ("프랜차이즈점포수", "개"), ("개업점포수", "개"), ("폐업점포수", "개"),
+                ]
+                for col, (label, unit) in zip(store_cols, labels_units):
+                    if label in store:
+                        col.metric(label, f"{store[label]:,.0f}{unit}")
+                rate_cols = st.columns(2)
+                if "개업률(%)" in store:
+                    rate_cols[0].metric("개업률", f"{store['개업률(%)']}%")
+                if "폐업률(%)" in store:
+                    rate_cols[1].metric("폐업률", f"{store['폐업률(%)']}%")
+
+            flp_stats, wrc_stats = detail["생활인구"], detail["직장인구"]
+            if flp_stats or wrc_stats:
+                st.subheader("👥 생활인구 · 직장인구 상세")
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.caption("생활인구")
+                    if "남성비율(%)" in flp_stats:
+                        st.write(f"성별: 남성 {flp_stats['남성비율(%)']}% · 여성 {flp_stats['여성비율(%)']}%")
+                    if "연령대별" in flp_stats:
+                        st.bar_chart(flp_stats["연령대별"].set_index("연령대")["인구수"])
+                    if not flp_stats:
+                        st.caption("데이터 없음")
+                with c2:
+                    st.caption("직장인구")
+                    if "남성비율(%)" in wrc_stats:
+                        st.write(f"성별: 남성 {wrc_stats['남성비율(%)']}% · 여성 {wrc_stats['여성비율(%)']}%")
+                    if "연령대별" in wrc_stats:
+                        st.bar_chart(wrc_stats["연령대별"].set_index("연령대")["인구수"])
+                    if not wrc_stats:
+                        st.caption("데이터 없음")
 
             map_df = pd.DataFrame({
                 "lat": [trdar_row["lat"], lat],
@@ -1435,7 +1601,7 @@ with tab_autopptx:
         if st.button("📑 리포트 생성", type="primary", key="autopptx_submit"):
             try:
                 with st.spinner("주소를 코드로 변환하는 중..."):
-                    sigungu_code, bdong_code, addr_row = resolve_dong_code(address)
+                    sigungu_code, bdong_code, addr_sido, addr_sigungu_name = _resolve_codes()
 
                 progress_box = st.empty()
 
@@ -1445,7 +1611,7 @@ with tab_autopptx:
                 with st.spinner("리포트 데이터 수집 중... (최초 조회 시 1~2분 정도 걸릴 수 있습니다)"):
                     report_data = fetch_report_data(
                         service_key=service_key,
-                        sido=addr_row["시도명"], sigungu_name=addr_row["시군구명"], dong_name=addr_row["동명"],
+                        sido=addr_sido, sigungu_name=addr_sigungu_name, dong_name=addr_dong,
                         sigungu_code=sigungu_code, bdong_code=bdong_code,
                         bun=bun or None, ji=ji if ji and ji != "0" else None,
                         kakao_key=kakao_key, vworld_key=vworld_key, reb_key=reb_key,

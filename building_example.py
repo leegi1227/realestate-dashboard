@@ -384,6 +384,73 @@ def add_pyeong_columns(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+_TX_PRICE_CANDIDATES = ["거래금액", "물건금액"]
+_TX_AREA_CANDIDATES = ["전용면적", "건물면적", "대지면적", "연면적", "계약면적"]
+
+
+def analyze_transaction_stats(df: pd.DataFrame) -> dict:
+    """실거래가 조회 결과(이미 특정 시군구+동으로 좁혀진 DataFrame)에서 주변(동단위) 통계를 집계.
+
+    이미 조회·필터링된 데이터를 대상으로 집계만 하므로 추가 API 호출이 없다.
+    거래금액 컬럼은 만원 단위 문자열(콤마 포함)로 오는 경우가 있어 숫자로 변환한 뒤 계산한다.
+    """
+    empty = {"총괄": {}, "유형별": pd.DataFrame(), "연월별추이": pd.DataFrame()}
+    if df is None or df.empty:
+        return empty
+
+    price_col = next((c for c in _TX_PRICE_CANDIDATES if c in df.columns), None)
+    if not price_col:
+        return empty
+
+    work = df.copy()
+    work["_거래금액(만원)"] = pd.to_numeric(
+        work[price_col].astype(str).str.replace(",", "", regex=False), errors="coerce"
+    )
+    work = work.dropna(subset=["_거래금액(만원)"])
+    if work.empty:
+        return empty
+
+    area_col = next((c for c in _TX_AREA_CANDIDATES if c in work.columns), None)
+    if area_col:
+        work["_면적(㎡)"] = pd.to_numeric(work[area_col], errors="coerce")
+        area_py = work["_면적(㎡)"] / _PYEONG_PER_SQM
+        work["_평당가(만원)"] = (work["_거래금액(만원)"] / area_py).where(area_py > 0)
+
+    prices_eok = work["_거래금액(만원)"] / 1e4
+    summary = {
+        "건수": len(work),
+        "평균거래가(억)": round(float(prices_eok.mean()), 2),
+        "중앙값거래가(억)": round(float(prices_eok.median()), 2),
+        "최고가(억)": round(float(prices_eok.max()), 2),
+        "최저가(억)": round(float(prices_eok.min()), 2),
+    }
+    if area_col:
+        valid_unit = work["_평당가(만원)"].dropna()
+        summary["평균평당가(만원)"] = round(float(valid_unit.mean()), 0) if not valid_unit.empty else None
+        summary["평균면적(평)"] = round(float((work["_면적(㎡)"] / _PYEONG_PER_SQM).mean()), 1)
+
+    by_type = pd.DataFrame()
+    type_col = next((c for c in ["건물유형", "건물주용도"] if c in work.columns), None)
+    if type_col:
+        grouped = work.groupby(type_col)["_거래금액(만원)"].agg(
+            건수="size", 평균거래가_억=lambda s: round(float((s / 1e4).mean()), 2),
+        )
+        by_type = grouped.sort_values("건수", ascending=False).reset_index().rename(
+            columns={type_col: "구분", "평균거래가_억": "평균거래가(억)"}
+        )
+
+    trend = pd.DataFrame()
+    if "계약년도" in work.columns and "계약월" in work.columns:
+        work["_연월"] = work["계약년도"].astype(str) + "-" + work["계약월"].astype(str).str.zfill(2)
+        grouped = work.groupby("_연월")["_거래금액(만원)"].agg(
+            건수="size", 평균거래가_억=lambda s: round(float((s / 1e4).mean()), 2),
+        )
+        trend = grouped.reset_index().rename(columns={"_연월": "연월", "평균거래가_억": "평균거래가(억)"})
+        trend = trend.sort_values("연월").reset_index(drop=True)
+
+    return {"총괄": summary, "유형별": by_type, "연월별추이": trend}
+
+
 def get_building_ledger(
     api: BuildingLedger,
     ledger_type: str,
@@ -781,6 +848,60 @@ def analyze_price_history(price_df: pd.DataFrame, top_units: int = 10) -> dict:
 
     units.sort(key=lambda u: u["최신가격"], reverse=True)
     return {"단위목록": units[:top_units], "경고": PRICE_HISTORY_WARNING}
+
+
+_PRICE_BUCKET_BINS = [0, 3, 5, 10, 20, 50, float("inf")]
+_PRICE_BUCKET_LABELS = ["3억 미만", "3~5억", "5~10억", "10~20억", "20~50억", "50억 이상"]
+
+
+def analyze_district_price_stats(price_df: pd.DataFrame, subject_price_eok: float = None) -> dict:
+    """동 전체 주택가격(공시가격) DataFrame(bun/ji 없이 동 단위로 한 번에 불러온 결과)에서
+
+    호(관리건축물대장PK)별 최신 연도 공시가격 기준 분포·통계를 산출한다. 필지별 개별 API
+    호출 없이, 이미 수집된 동 전체 데이터를 집계만 하므로 빠르다. 같은 호에 여러 연도
+    이력이 있으면 최신 연도 값만 사용한다.
+
+    subject_price_eok(억원)을 넘기면, 사이드바에 입력된 특정 필지의 공시가격이 동 전체
+    분포에서 상위 몇 %에 해당하는지(백분위)도 함께 계산해 돌려준다.
+    """
+    empty = {"총괄": {}, "가격구간분포": pd.DataFrame(), "백분위": None, "경고": PRICE_HISTORY_WARNING}
+    if (price_df is None or price_df.empty
+            or "관리건축물대장PK" not in price_df.columns or "stdDay" not in price_df.columns
+            or "주택가격" not in price_df.columns):
+        return empty
+
+    df = price_df.copy()
+    df["_연도"] = df["stdDay"].apply(extract_year)
+    df["_가격"] = pd.to_numeric(df.get("주택가격"), errors="coerce")
+    df = df.dropna(subset=["_연도", "_가격"])
+    if df.empty:
+        return empty
+
+    latest = df.sort_values("_연도").drop_duplicates(subset="관리건축물대장PK", keep="last")
+    prices_eok = latest["_가격"] / 1e8
+
+    summary = {
+        "기준연도": int(latest["_연도"].max()),
+        "호수(유닛수)": len(latest),
+        "평균공시가격(억)": round(float(prices_eok.mean()), 2),
+        "중앙값공시가격(억)": round(float(prices_eok.median()), 2),
+        "최고공시가격(억)": round(float(prices_eok.max()), 2),
+        "최저공시가격(억)": round(float(prices_eok.min()), 2),
+    }
+
+    bucket = pd.cut(prices_eok, bins=_PRICE_BUCKET_BINS, labels=_PRICE_BUCKET_LABELS, right=False)
+    counts = bucket.value_counts().reindex(_PRICE_BUCKET_LABELS).fillna(0).astype(int)
+    dist = pd.DataFrame({
+        "구간": _PRICE_BUCKET_LABELS,
+        "호수": counts.values,
+        "비율(%)": (counts.values / len(latest) * 100).round(1),
+    })
+
+    percentile = None
+    if subject_price_eok is not None and len(prices_eok) > 0:
+        percentile = round(float((prices_eok <= subject_price_eok).mean() * 100), 1)
+
+    return {"총괄": summary, "가격구간분포": dist, "백분위": percentile, "경고": PRICE_HISTORY_WARNING}
 
 
 def summarize_zoning(zoning_df: pd.DataFrame) -> list:
@@ -1343,6 +1464,175 @@ def get_seoul_trade_area_quarter_dataset(seoul_key: str, service: str, quarter: 
             return df, current
         current = _seoul_prev_quarter_id(current)
     return pd.DataFrame(), quarter
+
+
+_SEOUL_AGE_BUCKETS = [
+    ("10", "10대"), ("20", "20대"), ("30", "30대"),
+    ("40", "40대"), ("50", "50대"), ("60_ABOVE", "60대 이상"),
+]
+
+
+def _seoul_sum(df: pd.DataFrame, col: str):
+    """df가 비어있지 않고 col이 있으면 숫자합, 아니면 None (있는 컬럼만 골라 쓰는 방어적 헬퍼)."""
+    if df is None or df.empty or col not in df.columns:
+        return None
+    return float(pd.to_numeric(df[col], errors="coerce").sum())
+
+
+def analyze_seoul_trade_area_detail(trdar_row, selng_df: pd.DataFrame, stor_df: pd.DataFrame,
+                                     flpop_df: pd.DataFrame, wrc_df: pd.DataFrame) -> dict:
+    """서울 열린데이터광장 우리마을가게 상권분석서비스 4종(추정매출/점포/생활인구/직장인구)을
+
+    하나의 상권코드 기준으로 묶어, 대시보드 탭과 자동pptx 리포트가 공유하는 상세 통계 +
+    규칙기반 인사이트 문장을 만든다. "상권분석은 이 데이터를 중심으로 자세히"라는 방침에
+    따라 총괄/업종별에 그치지 않고 성별·연령대·주중주말·요일·시간대별 매출, 점포 개폐업·
+    프랜차이즈 비중, 생활인구·직장인구의 성별·연령대까지 최대한 뽑아낸다.
+
+    성별(ML_/FML_)·연령대(AGRDE_10_~60_ABOVE_)·주중주말(MDWK_/WKEND_)·점포개폐업
+    (OPBIZ_/CLSBIZ_, FRC_STOR_CO, SIMILR_INDUTY_STOR_CO) 컬럼명은 우리마을가게
+    상권분석서비스의 표준 명명 규칙을 따른 것으로, 이번에 실제 API 응답으로 검증하지는
+    못했다 — 존재하지 않는 컬럼은 조용히 건너뛰므로 항목이 비어 보이면 이것부터 의심할 것.
+    """
+    trdar_cd = trdar_row["TRDAR_CD"]
+    sel = selng_df[selng_df["TRDAR_CD"] == trdar_cd].copy() if selng_df is not None and not selng_df.empty else pd.DataFrame()
+    sto = stor_df[stor_df["TRDAR_CD"] == trdar_cd].copy() if stor_df is not None and not stor_df.empty else pd.DataFrame()
+    flp = flpop_df[flpop_df["TRDAR_CD"] == trdar_cd].copy() if flpop_df is not None and not flpop_df.empty else pd.DataFrame()
+    wrc = wrc_df[wrc_df["TRDAR_CD"] == trdar_cd].copy() if wrc_df is not None and not wrc_df.empty else pd.DataFrame()
+
+    total_sales = _seoul_sum(sel, "THSMON_SELNG_AMT")
+    total_stores = _seoul_sum(sto, "STOR_CO")
+    total_flpop = _seoul_sum(flp, "TOT_FLPOP_CO")
+    total_wrc = _seoul_sum(wrc, "TOT_WRC_POPLTN_CO")
+
+    result = {
+        "name": trdar_row.get("TRDAR_CD_NM"),
+        "총괄": {
+            "추정매출(원)": total_sales, "점포수": total_stores,
+            "생활인구": total_flpop, "직장인구": total_wrc,
+        },
+        "업종별": pd.DataFrame(), "성별매출": {}, "연령대별매출": pd.DataFrame(),
+        "주중주말매출": {}, "요일별매출": pd.DataFrame(), "시간대별매출": pd.DataFrame(),
+        "점포": {}, "생활인구": {}, "직장인구": {}, "인사이트": [],
+    }
+
+    if not sel.empty:
+        merged = sel[["SVC_INDUTY_CD", "SVC_INDUTY_CD_NM", "THSMON_SELNG_AMT", "THSMON_SELNG_CO"]].copy()
+        if not sto.empty and "SVC_INDUTY_CD" in sto.columns:
+            merge_cols = [c for c in ["SVC_INDUTY_CD", "STOR_CO", "OPBIZ_RT", "CLSBIZ_RT",
+                                       "FRC_STOR_CO", "SIMILR_INDUTY_STOR_CO"] if c in sto.columns]
+            merged = merged.merge(sto[merge_cols], on="SVC_INDUTY_CD", how="left")
+        for c in merged.columns:
+            if c not in ("SVC_INDUTY_CD", "SVC_INDUTY_CD_NM"):
+                merged[c] = pd.to_numeric(merged[c], errors="coerce")
+        result["업종별"] = merged.sort_values("THSMON_SELNG_AMT", ascending=False).reset_index(drop=True)
+
+    if not sel.empty and {"ML_SELNG_AMT", "FML_SELNG_AMT"}.issubset(sel.columns):
+        male, female = _seoul_sum(sel, "ML_SELNG_AMT") or 0, _seoul_sum(sel, "FML_SELNG_AMT") or 0
+        if male + female > 0:
+            result["성별매출"] = {
+                "남성(원)": male, "여성(원)": female,
+                "남성비율(%)": round(male / (male + female) * 100, 1),
+                "여성비율(%)": round(female / (male + female) * 100, 1),
+            }
+
+    if not sel.empty:
+        rows = [
+            {"연령대": label, "매출액(원)": _seoul_sum(sel, f"AGRDE_{suffix}_SELNG_AMT")}
+            for suffix, label in _SEOUL_AGE_BUCKETS if f"AGRDE_{suffix}_SELNG_AMT" in sel.columns
+        ]
+        rows = [r for r in rows if r["매출액(원)"] is not None]
+        if rows:
+            age_df = pd.DataFrame(rows)
+            tot = age_df["매출액(원)"].sum()
+            age_df["비율(%)"] = (age_df["매출액(원)"] / tot * 100).round(1) if tot else None
+            result["연령대별매출"] = age_df
+
+    if not sel.empty and {"MDWK_SELNG_AMT", "WKEND_SELNG_AMT"}.issubset(sel.columns):
+        mdwk, wkend = _seoul_sum(sel, "MDWK_SELNG_AMT") or 0, _seoul_sum(sel, "WKEND_SELNG_AMT") or 0
+        if mdwk + wkend > 0:
+            result["주중주말매출"] = {
+                "주중(원)": mdwk, "주말(원)": wkend,
+                "주중비율(%)": round(mdwk / (mdwk + wkend) * 100, 1),
+                "주말비율(%)": round(wkend / (mdwk + wkend) * 100, 1),
+            }
+
+    if not sel.empty:
+        day_cols = [("MON_SELNG_AMT", "월"), ("TUES_SELNG_AMT", "화"), ("WED_SELNG_AMT", "수"),
+                    ("THUR_SELNG_AMT", "목"), ("FRI_SELNG_AMT", "금"), ("SAT_SELNG_AMT", "토"), ("SUN_SELNG_AMT", "일")]
+        rows = [{"요일": label, "매출액(억원)": round((_seoul_sum(sel, col) or 0) / 1e8, 2)}
+                for col, label in day_cols if col in sel.columns]
+        if rows:
+            result["요일별매출"] = pd.DataFrame(rows)
+
+    if not sel.empty:
+        tz_cols = [("TMZON_00_06_SELNG_AMT", "00~06"), ("TMZON_06_11_SELNG_AMT", "06~11"),
+                   ("TMZON_11_14_SELNG_AMT", "11~14"), ("TMZON_14_17_SELNG_AMT", "14~17"),
+                   ("TMZON_17_21_SELNG_AMT", "17~21"), ("TMZON_21_24_SELNG_AMT", "21~24")]
+        rows = [{"시간대": label, "매출액(억원)": round((_seoul_sum(sel, col) or 0) / 1e8, 2)}
+                for col, label in tz_cols if col in sel.columns]
+        if rows:
+            result["시간대별매출"] = pd.DataFrame(rows)
+
+    if not sto.empty:
+        store_stats = {"총점포수": total_stores}
+        for col, label in [("FRC_STOR_CO", "프랜차이즈점포수"), ("SIMILR_INDUTY_STOR_CO", "유사업종점포수"),
+                            ("OPBIZ_STOR_CO", "개업점포수"), ("CLSBIZ_STOR_CO", "폐업점포수")]:
+            val = _seoul_sum(sto, col)
+            if val is not None:
+                store_stats[label] = val
+        for col, label in [("OPBIZ_RT", "개업률(%)"), ("CLSBIZ_RT", "폐업률(%)")]:
+            if col in sto.columns:
+                vals = pd.to_numeric(sto[col], errors="coerce").dropna()
+                if not vals.empty:
+                    store_stats[label] = round(float(vals.mean()), 2)
+        result["점포"] = store_stats
+
+    for pop_df, pop_col, key in [(flp, "FLPOP_CO", "생활인구"), (wrc, "WRC_POPLTN_CO", "직장인구")]:
+        if pop_df.empty:
+            continue
+        stats = {"총" + key: total_flpop if key == "생활인구" else total_wrc}
+        ml_col, fml_col = f"ML_{pop_col}", f"FML_{pop_col}"
+        if {ml_col, fml_col}.issubset(pop_df.columns):
+            m, f = _seoul_sum(pop_df, ml_col) or 0, _seoul_sum(pop_df, fml_col) or 0
+            if m + f > 0:
+                stats["남성비율(%)"] = round(m / (m + f) * 100, 1)
+                stats["여성비율(%)"] = round(f / (m + f) * 100, 1)
+        age_rows = [
+            {"연령대": label, "인구수": _seoul_sum(pop_df, f"AGRDE_{suffix}_{pop_col}")}
+            for suffix, label in _SEOUL_AGE_BUCKETS if f"AGRDE_{suffix}_{pop_col}" in pop_df.columns
+        ]
+        age_rows = [r for r in age_rows if r["인구수"] is not None]
+        if age_rows:
+            stats["연령대별"] = pd.DataFrame(age_rows)
+        result[key] = stats
+
+    insights = []
+    gm = result["성별매출"]
+    if gm:
+        dominant = "여성" if gm["여성비율(%)"] > gm["남성비율(%)"] else "남성"
+        insights.append(f"매출 기준 {dominant} 소비 비중이 {gm[dominant + '비율(%)']:.0f}%로 더 높습니다.")
+    if not result["연령대별매출"].empty:
+        top_age = result["연령대별매출"].sort_values("매출액(원)", ascending=False).iloc[0]
+        if pd.notna(top_age.get("비율(%)")):
+            insights.append(f"연령대별로는 {top_age['연령대']} 소비 비중이 {top_age['비율(%)']:.0f}%로 가장 큽니다.")
+    wm = result["주중주말매출"]
+    if wm:
+        if wm["주말비율(%)"] > wm["주중비율(%)"] * (2 / 5):
+            insights.append(f"주말(2일) 매출 비중이 {wm['주말비율(%)']:.0f}%로, 하루 평균으로 환산하면 평일보다 높아 주말 의존도가 있는 상권입니다.")
+        else:
+            insights.append(f"주중 매출 비중이 {wm['주중비율(%)']:.0f}%로, 평일 위주로 소비가 이루어지는 상권입니다.")
+    store = result["점포"]
+    if "개업률(%)" in store and "폐업률(%)" in store:
+        if store["폐업률(%)"] > store["개업률(%)"]:
+            insights.append(f"폐업률({store['폐업률(%)']:.1f}%)이 개업률({store['개업률(%)']:.1f}%)보다 높아 상권 위축 신호가 있습니다.")
+        else:
+            insights.append(f"개업률({store['개업률(%)']:.1f}%)이 폐업률({store['폐업률(%)']:.1f}%)보다 높아 상권이 활발히 확장되고 있습니다.")
+    if "프랜차이즈점포수" in store and total_stores:
+        frc_ratio = store["프랜차이즈점포수"] / total_stores * 100
+        insights.append(f"프랜차이즈 점포 비중이 전체의 {frc_ratio:.0f}%입니다.")
+    result["인사이트"] = insights
+
+    return result
 
 
 def combine_zoning_sources(master: dict) -> list:
