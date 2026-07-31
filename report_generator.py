@@ -14,6 +14,7 @@ python-pptx 버전이다. 두 부분으로 나뉜다:
 있지만, 임의 주소에 대해 지어낸 내용을 채우는 건 오히려 오해를 줄 수 있어서다.
 """
 
+import copy
 import datetime
 import io
 import json
@@ -28,6 +29,7 @@ from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.chart.data import CategoryChartData
 from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION, XL_TICK_LABEL_POSITION
+from pptx.oxml.ns import qn
 
 from building_example import (
     build_executive_summary,
@@ -72,10 +74,59 @@ FONT_NAME = "Calibri"
 SLIDE_W_IN = 13.333
 SLIDE_H_IN = 7.5
 
+# 지번이 바뀔 때마다 사용자가 PowerPoint에서 직접 고쳐 쓰는 4개 슬라이드(리포트 개요·
+# 섹션 구분·개발호재·SWOT). report_template/manual_slides.pptx에서 그대로 복사해 넣는다 —
+# 정성적 내용이라 공공API로 자동 채울 수 없어서다. 예시 콘텐츠는 연남동_상권분석1_보강본.pptx의
+# 5/6/13/26페이지를 그대로 옮긴 것.
+_MANUAL_SLIDES_PATH = os.path.join(os.path.dirname(__file__), "report_template", "manual_slides.pptx")
+
 
 # ==================================================================
 # 생성 계층 (python-pptx)
 # ==================================================================
+def _copy_manual_slide(prs, src_slide, src_slide_width):
+    """다른 Presentation의 슬라이드를 도형·배경·이미지까지 그대로 복사해 새 슬라이드로 붙인다.
+    원본 폭이 리포트 캔버스(13.333in)보다 좁으면(manual_slides.pptx는 10.83in) 좌우
+    중앙 정렬로 배치해 비율 왜곡 없이 끼워 넣는다."""
+    dest_slide = prs.slides.add_slide(prs.slide_layouts[6])
+    for shp in list(dest_slide.shapes):
+        shp._element.getparent().remove(shp._element)
+
+    src_cSld = src_slide._element.find(qn("p:cSld"))
+    dest_cSld = dest_slide._element.find(qn("p:cSld"))
+    src_bg = src_cSld.find(qn("p:bg"))
+    if src_bg is not None:
+        dest_bg = dest_cSld.find(qn("p:bg"))
+        if dest_bg is not None:
+            dest_cSld.remove(dest_bg)
+        dest_cSld.insert(0, copy.deepcopy(src_bg))
+
+    x_offset = (prs.slide_width - src_slide_width) // 2
+    dest_spTree = dest_slide.shapes._spTree
+    for shape in src_slide.shapes:
+        new_el = copy.deepcopy(shape._element)
+        spPr = new_el.find(qn("p:spPr"))
+        if spPr is not None:
+            xfrm = spPr.find(qn("a:xfrm"))
+            if xfrm is not None:
+                off = xfrm.find(qn("a:off"))
+                if off is not None and x_offset:
+                    off.set("x", str(int(off.get("x")) + x_offset))
+        if shape.shape_type == 13:  # PICTURE
+            blip = new_el.find(qn("p:blipFill")).find(qn("a:blip"))
+            old_rId = blip.get(qn("r:embed"))
+            image_part = src_slide.part.related_part(old_rId)
+            _, new_rId = dest_slide.part.get_or_add_image_part(io.BytesIO(image_part.blob))
+            blip.set(qn("r:embed"), new_rId)
+        dest_spTree.append(new_el)
+    return dest_slide
+
+
+def _insert_manual_slide(prs, manual_prs, index):
+    """manual_slides.pptx의 index번째(0-based) 슬라이드를 그대로 삽입."""
+    _copy_manual_slide(prs, manual_prs.slides[index], manual_prs.slide_width)
+
+
 def _new_slide(prs, dark=False):
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     bg = slide.background
@@ -594,11 +645,14 @@ def generate_pptx(data: dict) -> bytes:
     prs = Presentation()
     prs.slide_width = Inches(SLIDE_W_IN)
     prs.slide_height = Inches(SLIDE_H_IN)
+    manual_prs = Presentation(_MANUAL_SLIDES_PATH)
 
     _cover_slide(prs, data)
     _toc_slide(prs, data)
+    _insert_manual_slide(prs, manual_prs, 0)   # 리포트 개요 · 핵심지표 요약 (수동 편집)
     _summary_slide(prs, data)
     _building_slide(prs, data)
+    _insert_manual_slide(prs, manual_prs, 1)   # PART 1 섹션 구분: 입지 및 상권분석 (수동 편집)
     _location_slide(prs, data)
     _transactions_slide(prs, data)
     _district_slide(prs, data)
@@ -606,6 +660,8 @@ def generate_pptx(data: dict) -> bytes:
     _commercial_slide(prs, data)
     _trade_area_map_slide(prs, data)
     _seoul_detail_slide(prs, data)
+    _insert_manual_slide(prs, manual_prs, 2)   # 개발호재 종합 (수동 편집)
+    _insert_manual_slide(prs, manual_prs, 3)   # SWOT 분석 (수동 편집)
     _conclusion_slide(prs, data)
 
     buf = io.BytesIO()
@@ -1045,7 +1101,7 @@ def fetch_report_data(
     data["summary_stats"] = summary_stats
     data["cover_stats"] = summary_stats[:3]
 
-    toc_items_part1 = ["표지", "목차", "핵심 요약", "건축물 개요", "위치 및 입지"]
+    toc_items_part1 = ["표지", "목차", "리포트 개요", "핵심 요약", "건축물 개요", "입지·상권 개관", "위치 및 입지"]
     toc_items_part2 = ["실거래가 동향", "동단위 시장 통계", "공시가격 시계열", "상권 개황"]
     if data["trade_area_map"]:
         toc_items_part2.append("상권영역 지도")
@@ -1054,7 +1110,7 @@ def fetch_report_data(
     data["toc_parts"] = [
         {"title": "PART 01 · 입지 및 건축물 분석", "items": toc_items_part1},
         {"title": "PART 02 · 시장 데이터 분석", "items": toc_items_part2},
-        {"title": "PART 03 · 종합 평가", "items": ["종합 의견"]},
+        {"title": "PART 03 · 종합 평가", "items": ["개발호재 종합", "SWOT 분석", "종합 의견"]},
     ]
 
     _progress("종합 의견 정리 중...")
