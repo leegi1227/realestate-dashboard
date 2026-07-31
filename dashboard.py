@@ -393,7 +393,7 @@ with st.sidebar:
     )
     seoul_key = seoul_key.strip() if seoul_key else None
 
-    address = st.text_input("주소 (시/군/구 + 동)", value="성남시 분당구 백현동",
+    address = st.text_input("주소 (시/군/구 + 동)", value="서울시",
                              help="코드를 몰라도 동 이름으로 자동 검색됩니다.")
 
     col1, col2 = st.columns(2)
