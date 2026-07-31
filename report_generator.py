@@ -85,11 +85,8 @@ def _gradient_fill(shape_or_chart_format, angle=45):
 # 한글은 OS 기본 대체 글꼴(Windows에서는 사실상 맑은 고딕)로 표시된다.
 FONT_NAME = "Calibri"
 
-SLIDE_W_IN = 8.2677   # A4 210mm 세로(포트레이트)
-SLIDE_H_IN = 11.6929  # A4 297mm 세로(포트레이트)
-CONTENT_X = 0.6
-CONTENT_W = SLIDE_W_IN - CONTENT_X * 2  # 좌우 0.6in 여백을 뺀 본문 폭 (약 7.07in)
-FOOTER_Y = SLIDE_H_IN - 0.4
+SLIDE_W_IN = 13.333
+SLIDE_H_IN = 7.5
 
 # 지번이 바뀔 때마다 사용자가 PowerPoint에서 직접 고쳐 쓰는 4개 슬라이드(리포트 개요·
 # 섹션 구분·개발호재·SWOT). report_template/manual_slides.pptx에서 그대로 복사해 넣는다 —
@@ -101,17 +98,10 @@ _MANUAL_SLIDES_PATH = os.path.join(os.path.dirname(__file__), "report_template",
 # ==================================================================
 # 생성 계층 (python-pptx)
 # ==================================================================
-_FONT_SIZE_TAGS = {qn("a:rPr"), qn("a:defRPr"), qn("a:endParaRPr")}
-
-
-def _copy_manual_slide(prs, src_slide, src_slide_width, src_slide_height):
+def _copy_manual_slide(prs, src_slide, src_slide_width):
     """다른 Presentation의 슬라이드를 도형·배경·이미지까지 그대로 복사해 새 슬라이드로 붙인다.
-    원본(manual_slides.pptx, 10.83x7.5in 가로형)과 리포트 캔버스(A4 세로)의 가로세로 비율이
-    달라 축소가 필요한데, <p:grpSp> 그룹 변환으로 한 번에 축소해봤더니 PowerPoint가 도형
-    크기는 줄이면서도 텍스트 글자 크기는 그대로 둬서(그룹 축소의 알려진 렌더링 한계) 줄바꿈이
-    원본과 달라지고 텍스트가 카드 밖으로 넘치는 문제가 있었다 — 그래서 도형 좌표와 글자
-    크기(sz)를 도형 단위로 함께 축소하는 방식으로 바꿨다. 이러면 글자 대 상자 폭 비율이
-    원본과 동일하게 유지되어 줄바꿈도 원본 그대로 재현된다."""
+    원본 폭이 리포트 캔버스(13.333in)보다 좁으면(manual_slides.pptx는 10.83in) 좌우
+    중앙 정렬로 배치해 비율 왜곡 없이 끼워 넣는다."""
     dest_slide = prs.slides.add_slide(prs.slide_layouts[6])
     for shp in list(dest_slide.shapes):
         shp._element.getparent().remove(shp._element)
@@ -125,10 +115,7 @@ def _copy_manual_slide(prs, src_slide, src_slide_width, src_slide_height):
             dest_cSld.remove(dest_bg)
         dest_cSld.insert(0, copy.deepcopy(src_bg))
 
-    scale = min(prs.slide_width / src_slide_width, prs.slide_height / src_slide_height, 1.0)
-    x_off = (prs.slide_width - round(src_slide_width * scale)) // 2
-    y_off = Inches(0.5)  # 세로 캔버스가 원본보다 훨씬 커서, 가운데 정렬 대신 다른 슬라이드처럼 위쪽에 붙인다
-
+    x_offset = (prs.slide_width - src_slide_width) // 2
     dest_spTree = dest_slide.shapes._spTree
     for shape in src_slide.shapes:
         new_el = copy.deepcopy(shape._element)
@@ -137,16 +124,8 @@ def _copy_manual_slide(prs, src_slide, src_slide_width, src_slide_height):
             xfrm = spPr.find(qn("a:xfrm"))
             if xfrm is not None:
                 off = xfrm.find(qn("a:off"))
-                ext = xfrm.find(qn("a:ext"))
-                if off is not None:
-                    off.set("x", str(round(int(off.get("x")) * scale) + x_off))
-                    off.set("y", str(round(int(off.get("y")) * scale) + y_off))
-                if ext is not None:
-                    ext.set("cx", str(round(int(ext.get("cx")) * scale)))
-                    ext.set("cy", str(round(int(ext.get("cy")) * scale)))
-        for e in new_el.iter():
-            if e.tag in _FONT_SIZE_TAGS and e.get("sz"):
-                e.set("sz", str(max(100, round(int(e.get("sz")) * scale))))
+                if off is not None and x_offset:
+                    off.set("x", str(int(off.get("x")) + x_offset))
         if shape.shape_type == 13:  # PICTURE
             blip = new_el.find(qn("p:blipFill")).find(qn("a:blip"))
             old_rId = blip.get(qn("r:embed"))
@@ -158,8 +137,8 @@ def _copy_manual_slide(prs, src_slide, src_slide_width, src_slide_height):
 
 
 def _insert_manual_slide(prs, manual_prs, index):
-    """manual_slides.pptx의 index번째(0-based) 슬라이드를 그대로(축소) 삽입."""
-    _copy_manual_slide(prs, manual_prs.slides[index], manual_prs.slide_width, manual_prs.slide_height)
+    """manual_slides.pptx의 index번째(0-based) 슬라이드를 그대로 삽입."""
+    _copy_manual_slide(prs, manual_prs.slides[index], manual_prs.slide_width)
 
 
 def _new_slide(prs, dark=False):
@@ -214,11 +193,11 @@ def _rich_textbox(slide, x, y, w, h, runs, align=PP_ALIGN.LEFT, valign=MSO_ANCHO
 
 
 def _section_title(slide, text):
-    _textbox(slide, CONTENT_X, 0.45, CONTENT_W, 0.6, text, size=24, bold=True, color=NAVY)
+    _textbox(slide, 0.6, 0.45, 11.3, 0.6, text, size=28, bold=True, color=NAVY)
 
 
 def _page_footer(slide, address, label):
-    _textbox(slide, CONTENT_X, FOOTER_Y, CONTENT_W, 0.3, f"{address}  ·  {label}", size=9, color=MUTED)
+    _textbox(slide, 0.6, 7.12, 10, 0.3, f"{address}  ·  {label}", size=9, color=MUTED)
 
 
 def _card(slide, x, y, w, h, fill=CARD_BG, line=GRID_LINE):
@@ -353,9 +332,9 @@ def _line_chart(slide, x, y, w, h, categories, values, color, num_fmt="0.0", lab
 def _cover_slide(prs, data):
     slide = _new_slide(prs, dark=True)
     for cx, cy, cw, ch, color, grad in [
-        (3.8, 8.6, 5.6, 5.6, NAVY_LIGHT, False),
-        (4.6, 9.4, 4.0, 4.0, NAVY_DARK, False),
-        (5.3, 10.1, 2.6, 2.6, None, True),
+        (8.6, 3.0, 7.5, 7.5, NAVY_LIGHT, False),
+        (9.6, 4.0, 5.5, 5.5, NAVY_DARK, False),
+        (10.4, 4.8, 3.9, 3.9, None, True),
     ]:
         ellipse = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(cx), Inches(cy), Inches(cw), Inches(ch))
         if grad:
@@ -366,34 +345,34 @@ def _cover_slide(prs, data):
         ellipse.line.fill.background()
         ellipse.shadow.inherit = False
 
-    _textbox(slide, 0.9, 1.5, 6.4, 0.4, "부동산 분석 리포트", size=14, bold=True, color=TERRACOTTA)
-    _textbox(slide, 0.9, 1.95, 6.4, 2.4, data["address"], size=32, bold=True, color=WHITE)
-    _textbox(slide, 0.9, 4.15, 6.4, 0.5, "건축물 · 실거래가 · 상권 통합 분석", size=15, color=ICE)
+    _textbox(slide, 0.9, 2.35, 8, 0.4, "부동산 분석 리포트", size=14, bold=True, color=TERRACOTTA)
+    _textbox(slide, 0.9, 2.8, 9.5, 1.6, data["address"], size=40, bold=True, color=WHITE)
+    _textbox(slide, 0.9, 4.05, 8, 0.5, "건축물 · 실거래가 · 상권 통합 분석", size=16, color=ICE)
 
     stats = data.get("cover_stats") or []
     for i, s in enumerate(stats[:3]):
-        cx = 0.9 + i * 2.2
-        _textbox(slide, cx, 5.5, 2.0, 0.55, s["value"], size=19, bold=True, color=TERRACOTTA)
-        _textbox(slide, cx, 6.05, 2.0, 0.5, s["label"], size=9.5, color=ICE)
+        cx = 0.9 + i * 2.9
+        _textbox(slide, cx, 5.5, 2.6, 0.55, s["value"], size=24, bold=True, color=TERRACOTTA)
+        _textbox(slide, cx, 6.05, 2.6, 0.5, s["label"], size=10.5, color=ICE)
 
-    _textbox(slide, 0.9, 11.0, 6, 0.4, data["report_date"], size=11, color=MUTED)
+    _textbox(slide, 0.9, 6.7, 6, 0.4, data["report_date"], size=11, color=MUTED)
 
 
 def _toc_slide(prs, data):
     slide = _new_slide(prs)
     _section_title(slide, "목차")
-    _textbox(slide, CONTENT_X, 1.05, CONTENT_W, 0.3, f"{data['address']} 분석 리포트 구성", size=12, color=MUTED)
+    _textbox(slide, 0.6, 1.05, 11, 0.3, f"{data['address']} 분석 리포트 구성", size=12, color=MUTED)
 
     parts = data["toc_parts"]
-    x, w = CONTENT_X, CONTENT_W
-    y = 1.55
+    col_w, gap_x, start_x, start_y = 3.95, 0.2, 0.6, 1.55
     page_no = 1
-    for part in parts:
-        _textbox(slide, x, y, w, 0.4, part["title"], size=13.5, bold=True, color=TERRACOTTA)
-        y += 0.48
+    for pi, part in enumerate(parts):
+        x = start_x + pi * (col_w + gap_x)
+        _textbox(slide, x, start_y, col_w, 0.5, part["title"], size=13.5, bold=True, color=TERRACOTTA)
+        iy = start_y + 0.55
         for item in part["items"]:
             badge_w = 0.4 if page_no >= 10 else 0.32
-            badge = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(y), Inches(badge_w), Inches(0.32))
+            badge = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(iy), Inches(badge_w), Inches(0.32))
             badge.adjustments[0] = 0.2
             badge.fill.solid()
             badge.fill.fore_color.rgb = NAVY
@@ -410,28 +389,26 @@ def _toc_slide(prs, data):
             run.font.bold = True
             run.font.name = FONT_NAME
             run.font.color.rgb = WHITE
-            _textbox(slide, x + 0.5, y - 0.03, w - 0.53, 0.38, item, size=11.5, valign=MSO_ANCHOR.MIDDLE)
-            y += 0.42
+            _textbox(slide, x + 0.5, iy - 0.03, col_w - 0.53, 0.38, item, size=11.5, valign=MSO_ANCHOR.MIDDLE)
+            iy += 0.44
             page_no += 1
-        y += 0.18
     _page_footer(slide, data["address"], "목차")
 
 
 def _summary_slide(prs, data):
     slide = _new_slide(prs)
     _section_title(slide, "핵심 요약")
-    _card(slide, CONTENT_X, 1.25, CONTENT_W, 1.5)
-    _textbox(slide, CONTENT_X + 0.3, 1.42, CONTENT_W - 0.6, 1.2, data["summary_text"], size=12.5,
-             valign=MSO_ANCHOR.MIDDLE, line_spacing=1.25)
+    _card(slide, 0.6, 1.25, 12.1, 1.35)
+    _textbox(slide, 0.9, 1.42, 11.5, 1.0, data["summary_text"], size=13, valign=MSO_ANCHOR.MIDDLE, line_spacing=1.25)
 
     stats = data["summary_stats"]
-    cols, gap = 2, 0.25
-    card_w = (CONTENT_W - gap * (cols - 1)) / cols
+    cols, gap = 3, 0.25
+    card_w = (12.1 - gap * (cols - 1)) / cols
     card_h = 1.35
-    start_y = 3.1
+    start_y = 2.85
     for i, s in enumerate(stats):
         col, row = i % cols, i // cols
-        x = CONTENT_X + col * (card_w + gap)
+        x = 0.6 + col * (card_w + gap)
         y = start_y + row * (card_h + gap)
         _stat_card(slide, x, y, card_w, card_h, s["value"], s["label"], s.get("sub"))
     _page_footer(slide, data["address"], "핵심 요약")
@@ -442,36 +419,35 @@ def _building_slide(prs, data):
     _section_title(slide, "건축물 개요")
     b = data["building"]
 
-    top_x, top_y, top_w = CONTENT_X, 1.3, CONTENT_W
+    left_x, left_y, left_w, left_h = 0.6, 1.3, 6.7, 5.6
+    _card(slide, left_x, left_y, left_w, left_h)
     core = b["core"]
-    n_rows = max(1, math.ceil(len(core) / 2))
-    row_h = 0.68
-    top_h = 0.35 + n_rows * row_h
-    _card(slide, top_x, top_y, top_w, top_h)
+    row_h = (left_h - 0.4) / max(1, math.ceil(len(core) / 2))
     for i, (label, value) in enumerate(core):
         col, row = i % 2, i // 2
-        x = top_x + 0.3 + col * (top_w / 2 - 0.15)
-        y = top_y + 0.25 + row * row_h
-        _textbox(slide, x, y, top_w / 2 - 0.5, row_h * 0.42, label, size=10.5, color=MUTED)
-        _textbox(slide, x, y + row_h * 0.38, top_w / 2 - 0.5, row_h * 0.5, value, size=15, bold=True, color=NAVY)
+        x = left_x + 0.3 + col * (left_w / 2 - 0.15)
+        y = left_y + 0.25 + row * row_h
+        _textbox(slide, x, y, left_w / 2 - 0.5, row_h * 0.42, label, size=10.5, color=MUTED)
+        _textbox(slide, x, y + row_h * 0.38, left_w / 2 - 0.5, row_h * 0.5, value, size=15, bold=True, color=NAVY)
 
-    next_y = top_y + top_h + 0.35
+    right_x, right_w = 7.5, 5.2
+    next_y = 1.3
     if b.get("floors"):
-        _textbox(slide, CONTENT_X, next_y, CONTENT_W, 0.35, "층별 면적 (㎡)", size=13, bold=True, color=NAVY)
+        _textbox(slide, right_x, next_y, right_w, 0.35, "층별 면적 (㎡)", size=13, bold=True, color=NAVY)
         chart = _bar_chart(
-            slide, CONTENT_X, next_y + 0.4, CONTENT_W, 2.6,
+            slide, right_x, next_y + 0.4, right_w, 2.7,
             [f["label"] for f in b["floors"]], [f["value"] for f in b["floors"]],
             TERRACOTTA, horizontal=True,
         )
         _gradient_fill(chart.plots[0].series[0].format, angle=0)
-        next_y += 3.15
+        next_y += 3.35
 
     if b.get("zoning"):
-        _textbox(slide, CONTENT_X, next_y, CONTENT_W, 0.35, "용도지역 · 지구", size=13, bold=True, color=NAVY)
+        _textbox(slide, right_x, next_y, right_w, 0.35, "용도지역 · 지구", size=13, bold=True, color=NAVY)
         py = next_y + 0.4
         for z in b["zoning"][:5]:
-            pw = min(CONTENT_W, 0.35 + len(z) * 0.16)
-            pill = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(CONTENT_X), Inches(py), Inches(pw), Inches(0.42))
+            pw = min(right_w, 0.35 + len(z) * 0.16)
+            pill = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(right_x), Inches(py), Inches(pw), Inches(0.42))
             pill.adjustments[0] = 0.5
             pill.fill.solid()
             pill.fill.fore_color.rgb = ICE
@@ -496,26 +472,25 @@ def _location_slide(prs, data):
     _section_title(slide, "위치 및 입지")
     loc = data["location"]
 
-    map_x, map_y, map_w, map_h = CONTENT_X, 1.3, CONTENT_W, 3.6
+    map_x, map_y, map_w, map_h = 0.6, 1.3, 7.6, 5.6
     _add_picture_placeholder(slide, map_x, map_y, map_w, map_h, image_stream=loc.get("map_image"), idx=90)
     if not loc.get("map_image"):
         _textbox(slide, map_x, map_y + map_h / 2 - 0.35, map_w, 0.7,
                  "지도 이미지를 생성하지 못했습니다.\nPowerPoint에서 이 영역에 이미지를 끌어다 놓으면 바로 채워집니다.",
-                 size=11, color=MUTED, align=PP_ALIGN.CENTER, valign=MSO_ANCHOR.MIDDLE)
+                 size=12, color=MUTED, align=PP_ALIGN.CENTER, valign=MSO_ANCHOR.MIDDLE)
 
-    ry = map_y + map_h + 0.35
-    _card(slide, CONTENT_X, ry, CONTENT_W, 1.3)
-    _textbox(slide, CONTENT_X + 0.25, ry + 0.12, CONTENT_W - 0.5, 0.3, "행정동", size=10.5, color=MUTED)
-    _textbox(slide, CONTENT_X + 0.25, ry + 0.38, CONTENT_W - 0.5, 0.4, loc.get("adong_name") or "-", size=18, bold=True, color=NAVY)
-    _textbox(slide, CONTENT_X + 0.25, ry + 0.8, CONTENT_W - 0.5, 0.3, "법정동", size=10.5, color=MUTED)
-    _textbox(slide, CONTENT_X + 0.25, ry + 1.06, CONTENT_W - 0.5, 0.2, loc.get("ldong_name") or "-", size=13)
+    rx, rw = 8.5, 4.2
+    _card(slide, rx, 1.3, rw, 1.3)
+    _textbox(slide, rx + 0.25, 1.42, rw - 0.5, 0.3, "행정동", size=10.5, color=MUTED)
+    _textbox(slide, rx + 0.25, 1.68, rw - 0.5, 0.4, loc.get("adong_name") or "-", size=18, bold=True, color=NAVY)
+    _textbox(slide, rx + 0.25, 2.1, rw - 0.5, 0.3, "법정동", size=10.5, color=MUTED)
+    _textbox(slide, rx + 0.25, 2.36, rw - 0.5, 0.2, loc.get("ldong_name") or "-", size=13)
 
-    sy0 = ry + 1.65
-    _textbox(slide, CONTENT_X, sy0, CONTENT_W, 0.35, "인근 지하철역", size=13, bold=True, color=NAVY)
-    sy = sy0 + 0.4
+    _textbox(slide, rx, 2.85, rw, 0.35, "인근 지하철역", size=13, bold=True, color=NAVY)
+    sy = 3.25
     for st_ in loc.get("subway", [])[:3]:
-        _card(slide, CONTENT_X, sy, CONTENT_W, 0.85, fill=CARD_BG)
-        badge = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(CONTENT_X + 0.18), Inches(sy + 0.2), Inches(0.44), Inches(0.44))
+        _card(slide, rx, sy, rw, 0.85, fill=CARD_BG)
+        badge = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(rx + 0.18), Inches(sy + 0.2), Inches(0.44), Inches(0.44))
         badge.fill.solid()
         badge.fill.fore_color.rgb = RGBColor.from_string(st_.get("color", "1E2A44").lstrip("#"))
         badge.line.color.rgb = WHITE
@@ -532,8 +507,8 @@ def _location_slide(prs, data):
         run.font.bold = True
         run.font.name = FONT_NAME
         run.font.color.rgb = WHITE
-        _textbox(slide, CONTENT_X + 0.78, sy + 0.1, CONTENT_W - 1.0, 0.35, st_["name"], size=11.5, bold=True)
-        _textbox(slide, CONTENT_X + 0.78, sy + 0.45, CONTENT_W - 1.0, 0.3, f"{st_['line']} · 도보 약 {st_['dist']}", size=9.5, color=MUTED)
+        _textbox(slide, rx + 0.78, sy + 0.1, rw - 1.0, 0.35, st_["name"], size=11.5, bold=True)
+        _textbox(slide, rx + 0.78, sy + 0.45, rw - 1.0, 0.3, f"{st_['line']} · 도보 약 {st_['dist']}", size=9.5, color=MUTED)
         sy += 1.0
     _page_footer(slide, data["address"], "위치 및 입지")
 
@@ -544,21 +519,17 @@ def _transactions_slide(prs, data):
         return
     slide = _new_slide(prs)
     _section_title(slide, "실거래가 동향")
-    _textbox(slide, CONTENT_X, 1.3, CONTENT_W, 0.35, "최근 거래 내역", size=13, bold=True, color=NAVY)
-    table_h = min(2.6, 0.42 * (len(tx["rows"]) + 1))
-    _table(slide, CONTENT_X, 1.7, CONTENT_W, table_h,
+    _textbox(slide, 0.6, 1.3, 5.6, 0.35, "최근 거래 내역", size=13, bold=True, color=NAVY)
+    _table(slide, 0.6, 1.7, 5.6, min(2.6, 0.42 * (len(tx["rows"]) + 1)),
            ["거래일", "층", "전용면적", "거래가격"], tx["rows"], col_ratios=[1.6, 1.1, 1.4, 1.5])
 
-    next_y = 1.7 + table_h + 0.4
     if tx.get("trend") and len(tx["trend"]) >= 2:
-        _textbox(slide, CONTENT_X, next_y, CONTENT_W, 0.35, "거래가 추이", size=13, bold=True, color=NAVY)
-        _line_chart(slide, CONTENT_X, next_y + 0.4, CONTENT_W, 2.8,
-                    [t["label"] for t in tx["trend"]], [t["value"] for t in tx["trend"]], TERRACOTTA)
-        next_y += 3.55
+        _textbox(slide, 6.6, 1.3, 6.1, 0.35, "거래가 추이", size=13, bold=True, color=NAVY)
+        _line_chart(slide, 6.6, 1.7, 6.1, 2.7, [t["label"] for t in tx["trend"]], [t["value"] for t in tx["trend"]], TERRACOTTA)
 
     if tx.get("note"):
-        _card(slide, CONTENT_X, next_y, CONTENT_W, 1.3)
-        _textbox(slide, CONTENT_X + 0.3, next_y, CONTENT_W - 0.6, 1.3, tx["note"], size=13, valign=MSO_ANCHOR.MIDDLE)
+        _card(slide, 0.6, 4.6, 12.1, 1.3)
+        _textbox(slide, 0.9, 4.6, 11.5, 1.3, tx["note"], size=13, valign=MSO_ANCHOR.MIDDLE)
     _page_footer(slide, data["address"], "실거래가 동향")
 
 
@@ -568,17 +539,16 @@ def _district_slide(prs, data):
         return
     slide = _new_slide(prs)
     _section_title(slide, f"동단위 시장 통계 — {data['location'].get('adong_name') or ''}")
-    _textbox(slide, CONTENT_X, 1.3, CONTENT_W, 0.35, "준공연도대별 건물 수 분포 (동 전체)", size=13, bold=True, color=NAVY)
-    _bar_chart(slide, CONTENT_X, 1.7, CONTENT_W, 3.6,
+    _textbox(slide, 0.6, 1.3, 8, 0.35, "준공연도대별 건물 수 분포 (동 전체)", size=13, bold=True, color=NAVY)
+    _bar_chart(slide, 0.6, 1.7, 8.0, 4.6,
                [b["label"] for b in dist["age_buckets"]], [b["value"] for b in dist["age_buckets"]], NAVY_LIGHT)
 
-    next_y = 5.6
+    rx, rw = 9.0, 3.7
     if dist.get("callout"):
-        _stat_card(slide, CONTENT_X, next_y, CONTENT_W, 1.4, dist["callout"]["value"], dist["callout"]["label"], dist["callout"].get("sub"))
-        next_y += 1.75
+        _stat_card(slide, rx, 1.7, rw, 1.6, dist["callout"]["value"], dist["callout"]["label"], dist["callout"].get("sub"))
     if dist.get("note"):
-        _card(slide, CONTENT_X, next_y, CONTENT_W, 1.8)
-        _textbox(slide, CONTENT_X + 0.25, next_y + 0.2, CONTENT_W - 0.5, 1.4, dist["note"], size=12, line_spacing=1.3)
+        _card(slide, rx, 3.5, rw, 2.8)
+        _textbox(slide, rx + 0.25, 3.7, rw - 0.5, 2.4, dist["note"], size=12, line_spacing=1.3)
     _page_footer(slide, data["address"], "동단위 시장 통계")
 
 
@@ -588,19 +558,16 @@ def _price_history_slide(prs, data):
         return
     slide = _new_slide(prs)
     _section_title(slide, "공시가격 시계열")
-    _textbox(slide, CONTENT_X, 1.3, CONTENT_W, 0.35, "연도별 공시가격 추이", size=13, bold=True, color=NAVY)
-    _line_chart(slide, CONTENT_X, 1.7, CONTENT_W, 3.4, [t["label"] for t in ph["trend"]], [t["value"] for t in ph["trend"]], TERRACOTTA)
+    _textbox(slide, 0.6, 1.3, 7.4, 0.35, "연도별 공시가격 추이", size=13, bold=True, color=NAVY)
+    _line_chart(slide, 0.6, 1.7, 7.4, 4.6, [t["label"] for t in ph["trend"]], [t["value"] for t in ph["trend"]], TERRACOTTA)
 
-    next_y = 5.3
     if ph.get("rows"):
-        _textbox(slide, CONTENT_X, next_y, CONTENT_W, 0.35, "연도별 변동률", size=13, bold=True, color=NAVY)
-        table_h = min(2.2, 0.42 * (len(ph["rows"]) + 1))
-        _table(slide, CONTENT_X, next_y + 0.4, CONTENT_W, table_h,
+        _textbox(slide, 8.3, 1.3, 4.4, 0.35, "연도별 변동률", size=13, bold=True, color=NAVY)
+        _table(slide, 8.3, 1.7, 4.4, min(2.2, 0.42 * (len(ph["rows"]) + 1)),
                ["연도", "공시가격", "전년대비"], ph["rows"], col_ratios=[1.3, 1.6, 1.5])
-        next_y += 0.4 + table_h + 0.35
     if ph.get("note"):
-        _card(slide, CONTENT_X, next_y, CONTENT_W, 1.3)
-        _textbox(slide, CONTENT_X + 0.25, next_y, CONTENT_W - 0.5, 1.3, ph["note"], size=12, valign=MSO_ANCHOR.MIDDLE, line_spacing=1.3)
+        _card(slide, 8.3, 4.1, 4.4, 2.2)
+        _textbox(slide, 8.55, 4.1, 3.9, 2.2, ph["note"], size=12, valign=MSO_ANCHOR.MIDDLE, line_spacing=1.3)
     _page_footer(slide, data["address"], "공시가격 시계열")
 
 
@@ -611,21 +578,18 @@ def _commercial_slide(prs, data):
     slide = _new_slide(prs)
     _section_title(slide, "상권 개황 — 공실률 및 주변 업종")
 
-    next_y = 1.3
     if com.get("vacancy_trend"):
-        _textbox(slide, CONTENT_X, next_y, CONTENT_W, 0.35, f"공실률 추이 ({com.get('vacancy_label', '')})", size=13, bold=True, color=NAVY)
-        _line_chart(slide, CONTENT_X, next_y + 0.4, CONTENT_W, 3.2,
+        _textbox(slide, 0.6, 1.3, 6.0, 0.35, f"공실률 추이 ({com.get('vacancy_label', '')})", size=13, bold=True, color=NAVY)
+        _line_chart(slide, 0.6, 1.7, 6.0, 4.6,
                     [t["label"] for t in com["vacancy_trend"]], [t["value"] for t in com["vacancy_trend"]], NAVY_LIGHT)
-        next_y += 3.9
     else:
-        _card(slide, CONTENT_X, next_y + 0.4, CONTENT_W, 2.0)
-        _textbox(slide, CONTENT_X, next_y + 1.2, CONTENT_W, 0.6, "해당 지역 공실률 데이터를 찾지 못했습니다.",
+        _card(slide, 0.6, 1.7, 6.0, 4.6)
+        _textbox(slide, 0.6, 3.7, 6.0, 0.6, "해당 지역 공실률 데이터를 찾지 못했습니다.",
                  size=12, color=MUTED, align=PP_ALIGN.CENTER)
-        next_y += 2.7
 
     if com.get("top_industries"):
-        _textbox(slide, CONTENT_X, next_y, CONTENT_W, 0.35, "반경 500m 업종 Top 5 (점포 수)", size=13, bold=True, color=NAVY)
-        chart = _bar_chart(slide, CONTENT_X, next_y + 0.4, CONTENT_W, 3.2,
+        _textbox(slide, 6.9, 1.3, 5.8, 0.35, "반경 500m 업종 Top 5 (점포 수)", size=13, bold=True, color=NAVY)
+        chart = _bar_chart(slide, 6.9, 1.7, 5.8, 4.6,
                             [t["label"] for t in com["top_industries"]], [t["value"] for t in com["top_industries"]],
                             TERRACOTTA, horizontal=True)
         _gradient_fill(chart.plots[0].series[0].format, angle=0)
@@ -638,9 +602,9 @@ def _trade_area_map_slide(prs, data):
         return
     slide = _new_slide(prs)
     _section_title(slide, f"상권영역 지도 — {tam.get('name', '')}")
-    map_x, map_y, map_w, map_h = CONTENT_X, 1.3, CONTENT_W, 6.0
+    map_x, map_y, map_w, map_h = 0.6, 1.3, 12.1, 5.4
     _add_picture_placeholder(slide, map_x, map_y, map_w, map_h, image_stream=tam.get("map_image"), idx=91)
-    _textbox(slide, map_x, map_y + map_h + 0.05, map_w, 0.5,
+    _textbox(slide, map_x, map_y + map_h + 0.05, map_w, 0.3,
              "※ OpenStreetMap 기반 위치 참고 지도. 상권영역 경계 자체는 서울시 API가 중심좌표+면적만 제공해 "
              "정확한 폴리곤으로 표시할 수 없습니다. PowerPoint에서 이 영역에 이미지를 끌어다 놓으면 바로 교체됩니다.",
              size=8.5, italic=True, color=MUTED)
@@ -655,22 +619,19 @@ def _seoul_detail_slide(prs, data):
     _section_title(slide, f"서울 상권 상세 — {sd.get('name', '')}")
 
     stats = sd.get("stats") or []
-    cols, gap = 3, 0.2
-    card_w = (CONTENT_W - gap * (cols - 1)) / cols
+    cols, gap = 3, 0.25
+    card_w = (12.1 - gap * (cols - 1)) / cols
     for i, s in enumerate(stats[:3]):
-        x = CONTENT_X + i * (card_w + gap)
+        x = 0.6 + i * (card_w + gap)
         _stat_card(slide, x, 1.3, card_w, 1.2, s["value"], s["label"])
 
-    next_y = 2.85
     if sd.get("top_industries"):
-        _textbox(slide, CONTENT_X, next_y, CONTENT_W, 0.35, "업종별 매출 Top 5", size=13, bold=True, color=NAVY)
-        _table(slide, CONTENT_X, next_y + 0.4, CONTENT_W, 2.4, ["업종", "당월 매출"], sd["top_industries"], col_ratios=[3.6, 2.0])
-        next_y += 0.4 + 2.4 + 0.4
+        _textbox(slide, 0.6, 2.85, 5.6, 0.35, "업종별 매출 Top 5", size=13, bold=True, color=NAVY)
+        _table(slide, 0.6, 3.25, 5.6, 3.0, ["업종", "당월 매출"], sd["top_industries"], col_ratios=[3.6, 2.0])
 
     if sd.get("weekday"):
-        _textbox(slide, CONTENT_X, next_y, CONTENT_W, 0.35, "요일별 매출 (억원)", size=13, bold=True, color=NAVY)
-        chart = _bar_chart(slide, CONTENT_X, next_y + 0.4, CONTENT_W, 2.6,
-                            [d["label"] for d in sd["weekday"]], [d["value"] for d in sd["weekday"]],
+        _textbox(slide, 6.6, 2.85, 6.1, 0.35, "요일별 매출 (억원)", size=13, bold=True, color=NAVY)
+        chart = _bar_chart(slide, 6.6, 3.25, 6.1, 3.0, [d["label"] for d in sd["weekday"]], [d["value"] for d in sd["weekday"]],
                             TERRACOTTA, num_fmt="0.0")
         _gradient_fill(chart.plots[0].series[0].format, angle=0)
     _page_footer(slide, data["address"], "서울 상권 상세")
@@ -678,16 +639,16 @@ def _seoul_detail_slide(prs, data):
 
 def _conclusion_slide(prs, data):
     slide = _new_slide(prs, dark=True)
-    ellipse = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(-2.2), Inches(8.8), Inches(5.5), Inches(5.5))
+    ellipse = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(-2.5), Inches(4.2), Inches(6.5), Inches(6.5))
     ellipse.fill.solid()
     ellipse.fill.fore_color.rgb = NAVY_LIGHT
     ellipse.line.fill.background()
     ellipse.shadow.inherit = False
 
-    _textbox(slide, CONTENT_X, 0.7, CONTENT_W, 0.7, "종합 의견", size=26, bold=True, color=WHITE)
-    cy = 1.7
+    _textbox(slide, 0.9, 0.7, 8, 0.7, "종합 의견", size=32, bold=True, color=WHITE)
+    cy = 1.9
     for i, point in enumerate(data.get("conclusion") or []):
-        badge = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(CONTENT_X), Inches(cy + 0.05), Inches(0.36), Inches(0.36))
+        badge = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(0.9), Inches(cy + 0.05), Inches(0.36), Inches(0.36))
         _gradient_fill(badge, angle=45)
         badge.line.fill.background()
         badge.shadow.inherit = False
@@ -702,9 +663,9 @@ def _conclusion_slide(prs, data):
         run.font.bold = True
         run.font.name = FONT_NAME
         run.font.color.rgb = WHITE
-        _textbox(slide, CONTENT_X + 0.55, cy, CONTENT_W - 0.55, 1.2, point, size=13.5, color=ICE, line_spacing=1.3)
-        cy += 1.45
-    _textbox(slide, CONTENT_X, FOOTER_Y - 0.25, CONTENT_W, 0.4, f"{data['address']}  ·  {data['report_date']}", size=10, color=MUTED)
+        _textbox(slide, 1.5, cy, 10.6, 0.9, point, size=15, color=ICE, line_spacing=1.3)
+        cy += 1.15
+    _textbox(slide, 0.9, 6.9, 10, 0.4, f"{data['address']}  ·  {data['report_date']}", size=10, color=MUTED)
 
 
 def generate_pptx(data: dict) -> bytes:
@@ -734,8 +695,6 @@ def generate_pptx(data: dict) -> bytes:
     buf = io.BytesIO()
     prs.save(buf)
     return buf.getvalue()
-
-
 # ==================================================================
 # 데이터 계층 — 주소 -> 실제 데이터
 # ==================================================================
