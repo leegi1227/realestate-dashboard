@@ -10,7 +10,6 @@ streamlit run dashboard.py
 http://localhost:8501 주소를 직접 열면 됩니다.
 """
 
-import base64
 import datetime
 import io
 import math
@@ -18,7 +17,6 @@ import os
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 from PublicDataReader import BuildingLedger, TransactionPrice
 
 from building_example import (
@@ -1463,41 +1461,17 @@ with tab_autopptx:
                 for n in notes:
                     st.markdown(f"- {n}")
 
-        # st.download_button은 Streamlit이 내부 /media/<id> URL로 파일을 서빙하고 브라우저가
-        # 응답의 Content-Disposition 헤더를 읽어 파일명을 정하는데, Streamlit Community Cloud에서는
-        # 이 헤더가 아예 안 실려서(확장자도 안 붙음) 임의의 UUID 이름으로 저장돼버렸다.
-        # data: URI(<a download>)로 우회를 시도했지만, 이번엔 브라우저의 data: URI 길이 제한
-        # (~2MB, base64라 실제 파일 크기의 1.33배)에 리포트(2~3MB급)가 걸려 링크 자체가 깨졌다.
-        # 그래서 길이 제한이 없는 Blob URL(URL.createObjectURL)로 다시 우회한다 — 이것도 서버
-        # 응답 헤더와 무관하고, data: URI와 달리 파일 크기 제약이 사실상 없다.
+        # 한글 파일명 + st.download_button -> Content-Disposition이 깨져서 UUID로 저장됨 (수정1).
+        # data: URI -> 파일 크기가 브라우저 URL 길이 제한(~2MB)을 넘겨서 링크 자체가 깨짐 (수정2).
+        # Blob URL(components.html 안에서 생성) -> 로컬(streamlit run)에서는 완벽히 되는데 실제
+        # Streamlit Community Cloud에서는 여전히 UUID로 저장됨 — 아마 컴포넌트 iframe 안에서
+        # a.click()으로 트리거하는 다운로드를 Cloud 프록시나 특정 브라우저가 다르게 처리하는 듯
+        # (수정3, 원인 미확정). 커스텀 JS를 걷어내고 이 앱의 다른 모든 CSV/엑셀 버튼과 동일하게
+        # st.download_button + ASCII 파일명으로 되돌린다 — 가장 단순하고, 이미 이 앱에서 검증된
+        # 조합이다 (수정4).
         file_name = f"realestate_analysis_report_{datetime.datetime.now():%Y%m%d_%H%M%S}.pptx"
-        b64 = base64.b64encode(pptx_bytes).decode()
-        components.html(
-            f"""
-            <button id="pptx-dl-btn" style="display:block;box-sizing:border-box;width:100%;
-                padding:0.55rem 1rem;background-color:#FF4B4B;color:#FFFFFF;border:none;
-                border-radius:0.5rem;text-align:center;font-weight:600;font-size:1rem;
-                font-family:inherit;cursor:pointer;">📥 pptx 다운로드</button>
-            <script>
-              const b64 = "{b64}";
-              const byteChars = atob(b64);
-              const byteNumbers = new Uint8Array(byteChars.length);
-              for (let i = 0; i < byteChars.length; i++) {{
-                byteNumbers[i] = byteChars.charCodeAt(i);
-              }}
-              const blob = new Blob([byteNumbers], {{
-                type: "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-              }});
-              const url = URL.createObjectURL(blob);
-              document.getElementById("pptx-dl-btn").addEventListener("click", () => {{
-                const a = document.createElement("a");
-                a.href = url;
-                a.download = "{file_name}";
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-              }});
-            </script>
-            """,
-            height=52,
+        st.download_button(
+            "📥 pptx 다운로드", pptx_bytes, file_name,
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            type="primary", width='stretch', key="autopptx_download",
         )
