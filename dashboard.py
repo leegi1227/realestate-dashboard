@@ -10,6 +10,7 @@ streamlit run dashboard.py
 http://localhost:8501 주소를 직접 열면 됩니다.
 """
 
+import base64
 import datetime
 import io
 import math
@@ -1453,12 +1454,18 @@ with tab_autopptx:
     if result:
         addr_label, pptx_bytes = result
         st.caption(f"'{addr_label}' 리포트")
-        # 파일명에 한글이 들어가면 Streamlit Community Cloud가 Content-Disposition을
-        # 제대로 못 넘겨줘서 다운로드가 임의의 UUID 파일명으로 저장되는 문제가 있다
-        # (다른 다운로드 버튼들이 전부 영문 파일명을 쓰는 것도 같은 이유) — ASCII 파일명으로 우회.
+        # st.download_button은 Streamlit이 내부 /media/<id> URL로 파일을 서빙하고 브라우저가
+        # 응답의 Content-Disposition 헤더를 읽어 파일명을 정하는 방식인데, Streamlit Community
+        # Cloud에서는 이 헤더가 아예 안 실려서(확장자도 안 붙음) 다운로드가 임의의 UUID 이름으로
+        # 저장돼버린다. data: URI + <a download>는 파일을 페이지 안에 통째로 내장해서 서버 응답
+        # 헤더에 의존하지 않으므로 이 문제를 완전히 우회한다.
         file_name = f"realestate_analysis_report_{datetime.datetime.now():%Y%m%d_%H%M%S}.pptx"
-        st.download_button(
-            "📥 pptx 다운로드", pptx_bytes, file_name,
-            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            type="primary", width='stretch', key="autopptx_download",
+        b64 = base64.b64encode(pptx_bytes).decode()
+        st.markdown(
+            f'<a href="data:application/vnd.openxmlformats-officedocument.presentationml.presentation;base64,{b64}" '
+            f'download="{file_name}" '
+            f'style="display:block;box-sizing:border-box;width:100%;padding:0.55rem 1rem;'
+            f'background-color:#FF4B4B;color:#FFFFFF;border-radius:0.5rem;text-align:center;'
+            f'text-decoration:none;font-weight:600;">📥 pptx 다운로드</a>',
+            unsafe_allow_html=True,
         )
