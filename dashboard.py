@@ -1409,9 +1409,23 @@ with tab_autopptx:
         "(서울 소재 시) 서울 상권분석까지, 실제로 조회한 데이터로 슬라이드를 채웁니다."
     )
     st.caption(
-        "※ 상권 성격 · SNS 트렌드 · 개발호재 · SWOT 같은 정성적 항목은 공공데이터로 자동 수집되지 않아 "
-        "이 리포트에는 포함되지 않습니다."
+        "※ 상권 성격 · SNS 트렌드 · 개발호재 · SWOT 같은 정성적 항목은 공공데이터로 자동 수집되지 않습니다. "
+        "아래에 직접 입력하면 해당 내용 그대로 슬라이드에 반영되고, 비워두면 그 슬라이드는 생략됩니다."
     )
+
+    with st.expander("📈 개발호재 종합 (선택, 직접입력)", expanded=False):
+        growth_drivers_text = st.text_area(
+            "한 줄에 하나씩 입력하세요",
+            value="", height=120, key="autopptx_growth_drivers",
+            placeholder="예: 대장홍대선 2025.12 착공, 2031년 준공목표\n마포구 지구단위계획 재정비 (2026년 추진)",
+        )
+
+    with st.expander("🔍 SWOT 분석 (선택, 직접입력)", expanded=False):
+        swot_col1, swot_col2 = st.columns(2)
+        swot_strengths = swot_col1.text_area("S — 강점", value="", height=100, key="autopptx_swot_s")
+        swot_weaknesses = swot_col2.text_area("W — 약점", value="", height=100, key="autopptx_swot_w")
+        swot_opportunities = swot_col1.text_area("O — 기회", value="", height=100, key="autopptx_swot_o")
+        swot_threats = swot_col2.text_area("T — 위협", value="", height=100, key="autopptx_swot_t")
 
     if not service_key:
         st.warning("사이드바에 공공데이터포털 서비스키를 입력해야 사용할 수 있습니다.")
@@ -1436,6 +1450,11 @@ with tab_autopptx:
                         bun=bun or None, ji=ji if ji and ji != "0" else None,
                         kakao_key=kakao_key, vworld_key=vworld_key, reb_key=reb_key,
                         sangkwon_key=sangkwon_key, seoul_key=seoul_key,
+                        growth_drivers_text=growth_drivers_text,
+                        swot_text={
+                            "strengths": swot_strengths, "weaknesses": swot_weaknesses,
+                            "opportunities": swot_opportunities, "threats": swot_threats,
+                        },
                         progress_callback=_on_report_progress,
                     )
                 progress_box.empty()

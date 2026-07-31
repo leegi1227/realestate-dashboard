@@ -9,12 +9,14 @@ python-pptx 버전이다. 두 부분으로 나뉜다:
   2. 생성 계층: generate_pptx(data) — 그 딕셔너리를 python-pptx로 그려 pptx
      바이트를 반환한다.
 
-정성적 항목(상권 성격/SNS 트렌드/개발호재/SWOT)은 어떤 공공API로도 자동 수집되지
-않아 이 자동 생성 버전에서는 뺐다 — report_template/generate_report.js 목업에는
-있지만, 임의 주소에 대해 지어낸 내용을 채우는 건 오히려 오해를 줄 수 있어서다.
+정성적 항목(개발호재/SWOT)은 어떤 공공API로도 자동 수집되지 않는다. 예전에는
+report_template/manual_slides.pptx(연남동 클라이언트 리포트에서 그대로 복사한
+슬라이드)를 모든 주소에 동일하게 끼워 넣었지만, 이러면 임의 주소로 리포트를
+생성해도 연남동/홍대입구역 관련 가짜 문구가 그대로 남는 문제가 있었다. 지금은
+대시보드 사이드바에 사용자가 직접 입력한 텍스트가 있을 때만 해당 슬라이드를
+그리고, 비어 있으면 생략한다(가짜 데이터로 채우지 않음).
 """
 
-import copy
 import datetime
 import io
 import json
@@ -32,6 +34,7 @@ from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION, XL_TICK_LABEL_POS
 from pptx.oxml.ns import qn
 
 from building_example import (
+    analyze_seismic_risk,
     build_executive_summary,
     build_master_report,
     combine_zoning_sources,
@@ -88,59 +91,10 @@ FONT_NAME = "Calibri"
 SLIDE_W_IN = 13.333
 SLIDE_H_IN = 7.5
 
-# 지번이 바뀔 때마다 사용자가 PowerPoint에서 직접 고쳐 쓰는 4개 슬라이드(리포트 개요·
-# 섹션 구분·개발호재·SWOT). report_template/manual_slides.pptx에서 그대로 복사해 넣는다 —
-# 정성적 내용이라 공공API로 자동 채울 수 없어서다. 예시 콘텐츠는 연남동_상권분석1_보강본.pptx의
-# 5/6/13/26페이지를 그대로 옮긴 것.
-_MANUAL_SLIDES_PATH = os.path.join(os.path.dirname(__file__), "report_template", "manual_slides.pptx")
-
 
 # ==================================================================
 # 생성 계층 (python-pptx)
 # ==================================================================
-def _copy_manual_slide(prs, src_slide, src_slide_width):
-    """다른 Presentation의 슬라이드를 도형·배경·이미지까지 그대로 복사해 새 슬라이드로 붙인다.
-    원본 폭이 리포트 캔버스(13.333in)보다 좁으면(manual_slides.pptx는 10.83in) 좌우
-    중앙 정렬로 배치해 비율 왜곡 없이 끼워 넣는다."""
-    dest_slide = prs.slides.add_slide(prs.slide_layouts[6])
-    for shp in list(dest_slide.shapes):
-        shp._element.getparent().remove(shp._element)
-
-    src_cSld = src_slide._element.find(qn("p:cSld"))
-    dest_cSld = dest_slide._element.find(qn("p:cSld"))
-    src_bg = src_cSld.find(qn("p:bg"))
-    if src_bg is not None:
-        dest_bg = dest_cSld.find(qn("p:bg"))
-        if dest_bg is not None:
-            dest_cSld.remove(dest_bg)
-        dest_cSld.insert(0, copy.deepcopy(src_bg))
-
-    x_offset = (prs.slide_width - src_slide_width) // 2
-    dest_spTree = dest_slide.shapes._spTree
-    for shape in src_slide.shapes:
-        new_el = copy.deepcopy(shape._element)
-        spPr = new_el.find(qn("p:spPr"))
-        if spPr is not None:
-            xfrm = spPr.find(qn("a:xfrm"))
-            if xfrm is not None:
-                off = xfrm.find(qn("a:off"))
-                if off is not None and x_offset:
-                    off.set("x", str(int(off.get("x")) + x_offset))
-        if shape.shape_type == 13:  # PICTURE
-            blip = new_el.find(qn("p:blipFill")).find(qn("a:blip"))
-            old_rId = blip.get(qn("r:embed"))
-            image_part = src_slide.part.related_part(old_rId)
-            _, new_rId = dest_slide.part.get_or_add_image_part(io.BytesIO(image_part.blob))
-            blip.set(qn("r:embed"), new_rId)
-        dest_spTree.append(new_el)
-    return dest_slide
-
-
-def _insert_manual_slide(prs, manual_prs, index):
-    """manual_slides.pptx의 index번째(0-based) 슬라이드를 그대로 삽입."""
-    _copy_manual_slide(prs, manual_prs.slides[index], manual_prs.slide_width)
-
-
 def _new_slide(prs, dark=False):
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     bg = slide.background
@@ -395,6 +349,22 @@ def _toc_slide(prs, data):
     _page_footer(slide, data["address"], "목차")
 
 
+def _section_divider_slide(prs, part_no, kicker, title, subtitle):
+    """PART 구분용 다크 배경 슬라이드. 예전에는 manual_slides.pptx의 연남동 전용 슬라이드를
+    그대로 복사했지만, 지금은 실제 법정동명을 넣은 일반 문장만 쓰는 코드 생성 버전이다."""
+    slide = _new_slide(prs, dark=True)
+    ellipse = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(9.5), Inches(-2.0), Inches(6.5), Inches(6.5))
+    ellipse.fill.solid()
+    ellipse.fill.fore_color.rgb = NAVY_LIGHT
+    ellipse.line.fill.background()
+    ellipse.shadow.inherit = False
+
+    _textbox(slide, 0.9, 2.2, 6, 1.6, part_no, size=64, bold=True, color=NAVY_LIGHT)
+    _textbox(slide, 0.9, 3.55, 8, 0.4, kicker, size=14, bold=True, color=TERRACOTTA)
+    _textbox(slide, 0.9, 3.95, 10, 1.0, title, size=34, bold=True, color=WHITE)
+    _textbox(slide, 0.9, 4.95, 9.5, 0.8, subtitle, size=15, color=ICE, line_spacing=1.3)
+
+
 def _summary_slide(prs, data):
     slide = _new_slide(prs)
     _section_title(slide, "핵심 요약")
@@ -465,6 +435,39 @@ def _building_slide(prs, data):
             run.font.color.rgb = NAVY
             py += 0.55
     _page_footer(slide, data["address"], "건축물 개요")
+
+
+def _seismic_age_slide(prs, data):
+    seismic = data.get("seismic")
+    if not seismic or not seismic.get("dong_dist"):
+        return
+    slide = _new_slide(prs)
+    _section_title(slide, "노후도 · 내진 분석")
+
+    _textbox(slide, 0.6, 1.3, 6.6, 0.35, "동 전체 내진설계 분류 분포", size=13, bold=True, color=NAVY)
+    chart = _bar_chart(
+        slide, 0.6, 1.7, 6.6, 3.6,
+        [d["label"] for d in seismic["dong_dist"]], [d["value"] for d in seismic["dong_dist"]],
+        NAVY_LIGHT, horizontal=True,
+    )
+
+    if seismic.get("subject_label"):
+        _stat_card(slide, 7.5, 1.3, 5.2, 1.5, seismic["subject_label"], "대상 건물 내진 분류", seismic.get("subject_full"))
+
+    if seismic.get("age_dist"):
+        _textbox(slide, 7.5, 3.1, 5.2, 0.35, "노후도 구간별 분포 (동 전체)", size=13, bold=True, color=NAVY)
+        _bar_chart(slide, 7.5, 3.5, 5.2, 2.9,
+                   [d["label"] for d in seismic["age_dist"]], [d["value"] for d in seismic["age_dist"]], TERRACOTTA)
+    _page_footer(slide, data["address"], "노후도 · 내진 분석")
+
+
+def _intro_divider_slide(prs, data):
+    dong = data.get("location", {}).get("adong_name") or ""
+    subtitle = (
+        f"{dong} 일대의 입지 여건과 주변 상권 구조를 실제 데이터로 살펴본다" if dong
+        else "입지 여건과 주변 상권 구조를 실제 데이터로 살펴본다"
+    )
+    _section_divider_slide(prs, "01", "PART 1", "입지 및 상권 분석", subtitle)
 
 
 def _location_slide(prs, data):
@@ -552,6 +555,24 @@ def _district_slide(prs, data):
     _page_footer(slide, data["address"], "동단위 시장 통계")
 
 
+def _district_mix_slide(prs, data):
+    dist = data.get("district")
+    if not dist or not dist.get("mix"):
+        return
+    slide = _new_slide(prs)
+    _section_title(slide, f"동단위 시장 통계 — 주용도별 구성 ({data['location'].get('adong_name') or ''})")
+    _textbox(slide, 0.6, 1.3, 6.0, 0.35, "주용도별 건물 수 비중", size=13, bold=True, color=NAVY)
+    chart = _bar_chart(slide, 0.6, 1.7, 6.0, 4.6,
+                        [m["label"] for m in dist["mix"]], [m["value"] for m in dist["mix"]],
+                        NAVY_LIGHT, horizontal=True, num_fmt="0.0")
+
+    if dist.get("benchmark"):
+        _textbox(slide, 6.9, 1.3, 5.8, 0.35, "주용도별 규모 벤치마크 (중앙값)", size=13, bold=True, color=NAVY)
+        _table(slide, 6.9, 1.7, 5.8, min(2.6, 0.42 * (len(dist["benchmark"]) + 1)),
+               ["주용도", "층수", "용적률(%)", "높이(m)"], dist["benchmark"], col_ratios=[2.2, 1, 1.3, 1.3])
+    _page_footer(slide, data["address"], "동단위 시장 통계 — 주용도별")
+
+
 def _price_history_slide(prs, data):
     ph = data.get("price_history")
     if not ph or not ph.get("trend"):
@@ -596,6 +617,18 @@ def _commercial_slide(prs, data):
     _page_footer(slide, data["address"], "상권 개황")
 
 
+def _nearby_stores_detail_slide(prs, data):
+    com = data.get("commercial") or {}
+    stores = com.get("store_list")
+    if not stores:
+        return
+    slide = _new_slide(prs)
+    _section_title(slide, "반경 상가업소 상세 목록")
+    _table(slide, 0.6, 1.3, 12.1, min(5.6, 0.42 * (len(stores) + 1)),
+           ["상호명", "업종", "주소", "거리"], stores, col_ratios=[2.2, 1.6, 3.4, 1])
+    _page_footer(slide, data["address"], "반경 상가업소 상세")
+
+
 def _trade_area_map_slide(prs, data):
     tam = data.get("trade_area_map")
     if not tam:
@@ -637,6 +670,125 @@ def _seoul_detail_slide(prs, data):
     _page_footer(slide, data["address"], "서울 상권 상세")
 
 
+def _growth_drivers_slide(prs, data):
+    items = data.get("growth_drivers") or []
+    if not items:
+        return
+    slide = _new_slide(prs)
+    _section_title(slide, "개발호재 종합")
+    _textbox(slide, 0.6, 1.05, 11.5, 0.3,
+             "※ 사이드바에 직접 입력한 내용입니다 — 공공데이터로 자동 생성되지 않았습니다.",
+             size=10, italic=True, color=MUTED)
+    y = 1.55
+    for i, item in enumerate(items[:8]):
+        badge = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(0.6), Inches(y + 0.05), Inches(0.36), Inches(0.36))
+        _gradient_fill(badge, angle=45)
+        badge.line.fill.background()
+        badge.shadow.inherit = False
+        tf = badge.text_frame
+        tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0
+        tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+        p = tf.paragraphs[0]
+        p.alignment = PP_ALIGN.CENTER
+        run = p.add_run()
+        run.text = str(i + 1)
+        run.font.size = Pt(13)
+        run.font.bold = True
+        run.font.name = FONT_NAME
+        run.font.color.rgb = WHITE
+        _textbox(slide, 1.15, y, 11.35, 0.65, item, size=13, valign=MSO_ANCHOR.MIDDLE, line_spacing=1.2)
+        y += 0.72
+    _page_footer(slide, data["address"], "개발호재 종합")
+
+
+_SWOT_META = [
+    ("strengths", "S", "강점", GRADIENT_A),
+    ("weaknesses", "W", "약점", TERRACOTTA),
+    ("opportunities", "O", "기회", NAVY_LIGHT),
+    ("threats", "T", "위협", NAVY_DARK),
+]
+
+
+def _swot_slide(prs, data):
+    swot = data.get("swot") or {}
+    if not any(swot.get(key) for key, *_ in _SWOT_META):
+        return
+    slide = _new_slide(prs)
+    _section_title(slide, "SWOT 분석")
+    _textbox(slide, 0.6, 1.05, 11.5, 0.3,
+             "※ 사이드바에 직접 입력한 내용입니다 — 공공데이터로 자동 생성되지 않았습니다.",
+             size=10, italic=True, color=MUTED)
+    cell_w, cell_h, gap = 5.95, 2.55, 0.2
+    x0, y0 = 0.6, 1.5
+    for idx, (key, letter, kr, color) in enumerate(_SWOT_META):
+        items = swot.get(key) or []
+        if not items:
+            continue
+        col, row = idx % 2, idx // 2
+        x, y = x0 + col * (cell_w + gap), y0 + row * (cell_h + gap)
+        _card(slide, x, y, cell_w, cell_h)
+        _textbox(slide, x + 0.2, y + 0.15, cell_w - 0.4, 0.4, f"{letter} — {kr}", size=14, bold=True, color=color)
+        body = "\n".join(f"· {t}" for t in items[:5])
+        _textbox(slide, x + 0.2, y + 0.6, cell_w - 0.4, cell_h - 0.8, body, size=11, line_spacing=1.25)
+    _page_footer(slide, data["address"], "SWOT 분석")
+
+
+def _key_metrics_table_slide(prs, data):
+    slide = _new_slide(prs)
+    _section_title(slide, "핵심지표 종합 비교표")
+
+    core_map = dict(data.get("building", {}).get("core") or [])
+    rows = [
+        ["대지면적", core_map.get("대지면적", "데이터 없음")],
+        ["연면적", core_map.get("연면적", "데이터 없음")],
+        ["사용승인일", core_map.get("사용승인일", "데이터 없음")],
+    ]
+    seismic = data.get("seismic") or {}
+    rows.append(["대상 건물 내진 분류", seismic.get("subject_label") or "데이터 없음"])
+
+    tx_rows = data.get("transactions", {}).get("rows") or []
+    rows.append(["최근 실거래가", tx_rows[0][3] if tx_rows else "데이터 없음"])
+
+    ph_rows = data.get("price_history", {}).get("rows") or []
+    rows.append(["최근 공시가격", ph_rows[0][1] if ph_rows else "데이터 없음"])
+
+    com = data.get("commercial") or {}
+    rows.append(["공실률", f"{com['vacancy_trend'][-1]['value']}%" if com.get("vacancy_trend") else "데이터 없음"])
+
+    seoul = data.get("seoul_trade_area")
+    rows.append(["상권 추정매출(월)", seoul["stats"][0]["value"] if seoul and seoul.get("stats") else "데이터 없음"])
+
+    _table(slide, 0.6, 1.3, 12.1, min(5.6, 0.5 * (len(rows) + 1)), ["항목", "값"], rows, col_ratios=[1, 2], font_size=13)
+    _page_footer(slide, data["address"], "핵심지표 종합 비교표")
+
+
+_DATA_SOURCES = [
+    "국토교통부 건축HUB 건축물대장정보 서비스 (표제부 · 주택가격 · 지역지구구역 등)",
+    "국토교통부 실거래가 공개시스템 (PublicDataReader 경유)",
+    "한국부동산원 R-ONE 부동산통계정보시스템 (중대형 상가 공실률)",
+    "소상공인시장진흥공단 상가(상권)정보 Open API (반경 상가업소)",
+    "서울 열린데이터광장 우리마을가게 상권분석서비스 (서울 소재 주소만 해당)",
+    "카카오맵 Local API (주소 지오코딩)",
+]
+
+_APPENDIX_DISCLAIMER = (
+    "· 본 리포트는 공공데이터 API 응답을 자동 집계한 참고 자료이며, 법적 효력이 있는 감정평가 · 중개 문서가 아닙니다.\n"
+    "· 공시가격은 시세가 아닙니다(통상 시세의 60~70% 수준, 연도별 현실화율 정책 변동 포함).\n"
+    "· 개발호재 · SWOT 항목은 작성자가 사이드바에 직접 입력한 내용이 있을 때만 표시되며, 자동 생성되지 않습니다.\n"
+    "· 실거래가는 지번 일치 기준으로 매칭되며, 동일 건물이라도 지번 표기 차이로 누락될 수 있습니다."
+)
+
+
+def _appendix_slide(prs, data):
+    slide = _new_slide(prs)
+    _section_title(slide, "부록 — 데이터 출처 및 유의사항")
+    _textbox(slide, 0.6, 1.3, 11.5, 0.35, "데이터 출처", size=13, bold=True, color=NAVY)
+    _textbox(slide, 0.6, 1.7, 11.5, 2.1, "\n".join(f"· {s}" for s in _DATA_SOURCES), size=12, line_spacing=1.35)
+    _textbox(slide, 0.6, 4.0, 11.5, 0.35, "유의사항", size=13, bold=True, color=NAVY)
+    _textbox(slide, 0.6, 4.4, 11.5, 2.4, _APPENDIX_DISCLAIMER, size=11, color=MUTED, line_spacing=1.4)
+    _page_footer(slide, data["address"], "부록")
+
+
 def _conclusion_slide(prs, data):
     slide = _new_slide(prs, dark=True)
     ellipse = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(-2.5), Inches(4.2), Inches(6.5), Inches(6.5))
@@ -668,29 +820,60 @@ def _conclusion_slide(prs, data):
     _textbox(slide, 0.9, 6.9, 10, 0.4, f"{data['address']}  ·  {data['report_date']}", size=10, color=MUTED)
 
 
+def _slide_plan(data):
+    """실제로 그려질 슬라이드만 순서대로 나열한 (파트번호, 목차라벨, 렌더함수) 리스트.
+
+    표지/목차 자신은 여기 포함하지 않는다(별도 처리). 각 항목의 존재 여부(조건부
+    슬라이드)를 여기 한 곳에서만 판정해서, 목차 페이지 번호가 실제 슬라이드 순서와
+    어긋나는 일이 구조적으로 생기지 않게 한다 — 예전에는 목차 항목 리스트를
+    fetch_report_data()에서 슬라이드 스킵 조건과 별개로 하드코딩해서, 데이터가 없어
+    슬라이드가 조용히 생략될 때마다 그 뒤 모든 페이지 번호가 밀리는 버그가 있었다."""
+    dist = data.get("district") or {}
+    com = data.get("commercial") or {}
+    swot = data.get("swot") or {}
+
+    return [
+        (1, "핵심 요약", _summary_slide),
+        (1, "건축물 개요", _building_slide),
+        (1, "노후도 · 내진 분석", _seismic_age_slide) if data.get("seismic", {}).get("dong_dist") else None,
+        (1, "입지 · 상권 개관", _intro_divider_slide),
+        (1, "위치 및 입지", _location_slide),
+        (2, "실거래가 동향", _transactions_slide) if data.get("transactions", {}).get("rows") else None,
+        (2, "동단위 시장 통계 — 연대별", _district_slide) if dist.get("age_buckets") else None,
+        (2, "동단위 시장 통계 — 주용도별", _district_mix_slide) if dist.get("mix") else None,
+        (2, "공시가격 시계열", _price_history_slide) if data.get("price_history", {}).get("trend") else None,
+        (2, "상권 개황", _commercial_slide) if (com.get("vacancy_trend") or com.get("top_industries")) else None,
+        (2, "반경 상가업소 상세", _nearby_stores_detail_slide) if com.get("store_list") else None,
+        (2, "상권영역 지도", _trade_area_map_slide) if data.get("trade_area_map") else None,
+        (2, "서울 상권 상세", _seoul_detail_slide) if data.get("seoul_trade_area") else None,
+        (3, "개발호재 종합", _growth_drivers_slide) if data.get("growth_drivers") else None,
+        (3, "SWOT 분석", _swot_slide) if any(swot.get(k) for k in ("strengths", "weaknesses", "opportunities", "threats")) else None,
+        (3, "핵심지표 종합 비교표", _key_metrics_table_slide),
+        (3, "종합 의견", _conclusion_slide),
+        (3, "부록 — 데이터 출처 및 유의사항", _appendix_slide),
+    ]
+
+
 def generate_pptx(data: dict) -> bytes:
     """fetch_report_data()가 만든 딕셔너리로 pptx를 그려 바이트로 반환."""
     prs = Presentation()
     prs.slide_width = Inches(SLIDE_W_IN)
     prs.slide_height = Inches(SLIDE_H_IN)
-    manual_prs = Presentation(_MANUAL_SLIDES_PATH)
+
+    plan = [item for item in _slide_plan(data) if item is not None]
+
+    part_titles = {1: "PART 01 · 입지 및 건축물 분석", 2: "PART 02 · 시장 데이터 분석", 3: "PART 03 · 종합 평가"}
+    data["toc_parts"] = [
+        {"title": part_titles[part_no], "items": ["표지", "목차"] + [label for p, label, _ in plan if p == part_no]}
+        if part_no == 1 else
+        {"title": part_titles[part_no], "items": [label for p, label, _ in plan if p == part_no]}
+        for part_no in (1, 2, 3)
+    ]
 
     _cover_slide(prs, data)
     _toc_slide(prs, data)
-    _insert_manual_slide(prs, manual_prs, 0)   # 리포트 개요 · 핵심지표 요약 (수동 편집)
-    _summary_slide(prs, data)
-    _building_slide(prs, data)
-    _insert_manual_slide(prs, manual_prs, 1)   # PART 1 섹션 구분: 입지 및 상권분석 (수동 편집)
-    _location_slide(prs, data)
-    _transactions_slide(prs, data)
-    _district_slide(prs, data)
-    _price_history_slide(prs, data)
-    _commercial_slide(prs, data)
-    _trade_area_map_slide(prs, data)
-    _seoul_detail_slide(prs, data)
-    _insert_manual_slide(prs, manual_prs, 2)   # 개발호재 종합 (수동 편집)
-    _insert_manual_slide(prs, manual_prs, 3)   # SWOT 분석 (수동 편집)
-    _conclusion_slide(prs, data)
+    for _part_no, _label, render_fn in plan:
+        render_fn(prs, data)
 
     buf = io.BytesIO()
     prs.save(buf)
@@ -822,7 +1005,7 @@ def _build_district(master):
     old_df = master.get("노후도")
     subject_age = int(old_df.iloc[0]["경과연수"]) if old_df is not None and not old_df.empty else None
 
-    result = {"age_buckets": [], "callout": None, "note": None}
+    result = {"age_buckets": [], "callout": None, "note": None, "mix": [], "benchmark": []}
     if not stats or stats.get("연대별") is None or stats["연대별"].empty:
         return result
 
@@ -841,6 +1024,21 @@ def _build_district(master):
         else:
             result["note"] = f"동 전체 평균 경과연수는 {avg_age}년입니다."
         result["callout"] = {"value": f"{avg_age}년", "label": "동 전체 평균 경과연수"}
+
+    by_purpose = stats.get("주용도별")
+    if by_purpose is not None and not by_purpose.empty:
+        result["mix"] = [
+            {"label": row["주용도"], "value": float(row["비율(%)"])} for _, row in by_purpose.iterrows()
+        ]
+
+    benchmark = stats.get("규모벤치마크")
+    if benchmark is not None and not benchmark.empty:
+        def _fmt(v):
+            return "-" if pd.isna(v) else f"{v:g}"
+        result["benchmark"] = [
+            [row["주용도"], _fmt(row.get("층수(중앙값)")), _fmt(row.get("용적률(중앙값,%)")), _fmt(row.get("높이(중앙값,m)"))]
+            for _, row in benchmark.iterrows()
+        ]
     return result
 
 
@@ -872,7 +1070,7 @@ def _build_price_history(master):
 def _build_commercial(reb_key, sangkwon_key, dong_name, lon, lat):
     """공실률/주변 상가업소 조회. 실패 사유를 삼키지 않고 result["notes"]에 남겨서
     리포트에 왜 이 섹션이 비었는지 대시보드에서 그대로 보여줄 수 있게 한다."""
-    result = {"vacancy_trend": [], "vacancy_label": "", "top_industries": [], "notes": []}
+    result = {"vacancy_trend": [], "vacancy_label": "", "top_industries": [], "store_list": [], "notes": []}
 
     if not reb_key:
         result["notes"].append("공실률: 한국부동산원 인증키 미입력")
@@ -917,6 +1115,17 @@ def _build_commercial(reb_key, sangkwon_key, dong_name, lon, lat):
             else:
                 counts = stores_df["indsSclsNm"].value_counts().head(5)
                 result["top_industries"] = [{"label": k, "value": int(v)} for k, v in counts.items()]
+
+                top10 = stores_df.head(10)
+                result["store_list"] = [
+                    [
+                        row.get("bizesNm") or "-",
+                        row.get("indsSclsNm") or row.get("indsMclsNm") or "-",
+                        row.get("rdnmAdr") or row.get("lnoAdr") or "-",
+                        f"{int(row['거리(m)'])}m" if pd.notna(row.get("거리(m)")) else "-",
+                    ]
+                    for _, row in top10.iterrows()
+                ]
         except Exception as e:
             result["notes"].append(f"주변 상가업소: 조회 오류 ({e})")
     return result
@@ -1019,6 +1228,17 @@ def _build_conclusion(master, data):
     if ph.get("trend") and ph.get("note"):
         points.append(f"공시가격은 {ph['note']}")
 
+    tx = data.get("transactions") or {}
+    if tx.get("trend") and ph.get("trend"):
+        latest_tx = tx["trend"][-1]["value"]
+        latest_ph = ph["trend"][-1]["value"]
+        if latest_ph:
+            ratio = latest_tx / latest_ph * 100
+            points.append(
+                f"최근 실거래가({latest_tx:.1f}억)는 최근 공시가격({latest_ph:.1f}억)의 약 {ratio:.0f}% 수준으로, "
+                f"{'현실화율 대비 높게' if ratio >= 150 else '통상적인 시세-공시가격 격차 범위 내로'} 형성되어 있습니다."
+            )
+
     if not points:
         points.append("자동 분석 근거가 될 데이터가 충분하지 않아, 추가 리서치가 필요합니다.")
     return points
@@ -1027,7 +1247,7 @@ def _build_conclusion(master, data):
 def fetch_report_data(
     *, service_key, sido, sigungu_name, dong_name, sigungu_code, bdong_code, bun, ji,
     kakao_key=None, vworld_key=None, reb_key=None, sangkwon_key=None, seoul_key=None,
-    months_lookback=12, progress_callback=None,
+    months_lookback=12, growth_drivers_text=None, swot_text=None, progress_callback=None,
 ) -> dict:
     """주소(시군구/법정동/번지) 하나에 대해 실제 데이터를 모아 generate_pptx()용 딕셔너리로 반환."""
     from PublicDataReader import BuildingLedger, TransactionPrice
@@ -1082,7 +1302,25 @@ def fetch_report_data(
             core_list.append(("지상/지하층수", f"{floors_top or 0}층 / {floors_base or 0}층"))
 
     zoning = combine_zoning_sources(master)
-    data["building"] = {"core": core_list, "floors": [], "zoning": zoning}
+
+    _progress("층별 면적 조회 중...")
+    floors = []
+    try:
+        floor_df = get_building_ledger(
+            api, ledger_type="층별개요", sigungu_code=sigungu_code, bdong_code=bdong_code,
+            bun=bun, ji=ji, max_rows=200, wait_time=0.15,
+        )
+        if floor_df is not None and not floor_df.empty and "면적" in floor_df.columns and "층번호명" in floor_df.columns:
+            floor_df = floor_df.copy()
+            floor_df["_면적"] = pd.to_numeric(floor_df["면적"], errors="coerce")
+            floor_df = floor_df[floor_df["_면적"].notna() & (floor_df["_면적"] > 0)]
+            floors = [
+                {"label": row["층번호명"], "value": round(float(row["_면적"]), 1)}
+                for _, row in floor_df.head(20).iterrows()
+            ]
+    except Exception:
+        pass
+    data["building"] = {"core": core_list, "floors": floors, "zoning": zoning}
 
     # ---- 위치 및 입지 ----
     coord = master.get("좌표")
@@ -1106,9 +1344,33 @@ def fetch_report_data(
             sub = f"{age}년 경과" + (" · 노후" if age and age >= 30 else "") if age is not None else None
             summary_stats.append({"label": "사용승인일 (경과연수)", "value": f"{approval_year}년", "sub": sub})
     seismic_list = (master.get("내진분석") or {}).get("취약우선목록")
+    seismic_data = {"dong_dist": [], "age_dist": [], "subject_label": None, "subject_full": None}
     if seismic_list is not None and not seismic_list.empty:
         seismic_full = str(seismic_list.iloc[0]["내진분류"])
+        seismic_data["subject_label"] = _short_seismic_label(seismic_full)
+        seismic_data["subject_full"] = seismic_full
         summary_stats.append({"label": "내진 설계", "value": _short_seismic_label(seismic_full), "sub": seismic_full})
+
+    # 대상 건물 내진분석(master["내진분석"])은 지번 하나(호실 1건)짜리라 분포를 그릴 수 없다 —
+    # 동 전체 표제부(district_title_df, 위에서 이미 조회함)를 따로 analyze_seismic_risk에
+    # 태워서 동단위 분류 분포를 얻는다. API 재호출 없이 로컬 재계산만 한다.
+    try:
+        if district_title_df is not None and not district_title_df.empty:
+            dong_seismic = analyze_seismic_risk(district_title_df, top_n=1)
+            dist_df = dong_seismic.get("분류별집계")
+            if dist_df is not None and not dist_df.empty:
+                seismic_data["dong_dist"] = [
+                    {"label": _short_seismic_label(row["분류"]), "value": int(row["건수"])}
+                    for _, row in dist_df.iterrows()
+                ]
+    except Exception:
+        pass
+    age_dist_df = (master.get("동단위통계") or {}).get("노후도분포")
+    if age_dist_df is not None and not age_dist_df.empty:
+        seismic_data["age_dist"] = [
+            {"label": row["구간"], "value": int(row["건수"])} for _, row in age_dist_df.iterrows()
+        ]
+    data["seismic"] = seismic_data
 
     # 어떤 섹션이 왜 빠졌는지(키 미입력/데이터 없음/API 오류) 대시보드에 그대로 보여주기 위한 메모.
     notes = []
@@ -1161,20 +1423,28 @@ def fetch_report_data(
         data["trade_area_map"] = None
 
     data["summary_stats"] = summary_stats
-    data["cover_stats"] = summary_stats[:3]
+
+    # 표지에는 상황에 따라 있을 수도 없을 수도 있는 5개 항목 중 "가장 눈에 띄는" 3개만
+    # 우선순위대로 골라 쓴다 (예전에는 summary_stats[:3]으로 그냥 앞 3개를 썼는데, 계산
+    # 순서에 따라 달라지는 우연의 결과였다).
+    _cover_priority = ["최근 실거래가", "내진 설계", "공실률", "상권 추정매출(월)", "사용승인일 (경과연수)"]
+    _stats_by_label = {s["label"]: s for s in summary_stats}
+    cover_stats = [_stats_by_label[label] for label in _cover_priority if label in _stats_by_label][:3]
+    data["cover_stats"] = cover_stats or summary_stats[:3]
+
     data["notes"] = notes
 
-    toc_items_part1 = ["표지", "목차", "리포트 개요", "핵심 요약", "건축물 개요", "입지·상권 개관", "위치 및 입지"]
-    toc_items_part2 = ["실거래가 동향", "동단위 시장 통계", "공시가격 시계열", "상권 개황"]
-    if data["trade_area_map"]:
-        toc_items_part2.append("상권영역 지도")
-    if seoul_detail:
-        toc_items_part2.append("서울 상권 상세")
-    data["toc_parts"] = [
-        {"title": "PART 01 · 입지 및 건축물 분석", "items": toc_items_part1},
-        {"title": "PART 02 · 시장 데이터 분석", "items": toc_items_part2},
-        {"title": "PART 03 · 종합 평가", "items": ["개발호재 종합", "SWOT 분석", "종합 의견"]},
-    ]
+    def _parse_lines(text):
+        return [line.strip() for line in (text or "").splitlines() if line.strip()]
+
+    data["growth_drivers"] = _parse_lines(growth_drivers_text)
+    swot_text = swot_text or {}
+    data["swot"] = {
+        "strengths": _parse_lines(swot_text.get("strengths")),
+        "weaknesses": _parse_lines(swot_text.get("weaknesses")),
+        "opportunities": _parse_lines(swot_text.get("opportunities")),
+        "threats": _parse_lines(swot_text.get("threats")),
+    }
 
     _progress("종합 의견 정리 중...")
     data["conclusion"] = _build_conclusion(master, data)
