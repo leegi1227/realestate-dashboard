@@ -911,21 +911,31 @@ def _build_price_history(master):
 
 
 def _build_commercial(reb_key, sangkwon_key, dong_name, lon, lat):
-    result = {"vacancy_trend": [], "vacancy_label": "", "top_industries": []}
+    """공실률/주변 상가업소 조회. 실패 사유를 삼키지 않고 result["notes"]에 남겨서
+    리포트에 왜 이 섹션이 비었는지 대시보드에서 그대로 보여줄 수 있게 한다."""
+    result = {"vacancy_trend": [], "vacancy_label": "", "top_industries": [], "notes": []}
 
-    if reb_key:
+    if not reb_key:
+        result["notes"].append("공실률: 한국부동산원 인증키 미입력")
+    else:
         try:
             statbl_id = REB_COMMERCIAL_VACANCY_STATBL_IDS["중대형 상가"]
             quarter = reb_current_quarter_id()
             snap_df, used_quarter, _ = get_reb_vacancy_snapshot(reb_key, statbl_id, quarter)
-            if snap_df is not None and not snap_df.empty:
+            if snap_df is None or snap_df.empty:
+                result["notes"].append("공실률: 한국부동산원 응답이 비어 있음")
+            else:
                 keyword = dong_name[:-1] if dong_name and dong_name.endswith("동") else dong_name
                 match = snap_df[snap_df["CLS_FULLNM"].astype(str).str.contains(keyword, na=False)] if keyword else pd.DataFrame()
-                if not match.empty:
+                if match.empty:
+                    result["notes"].append(f"공실률: '{keyword}'이(가) 한국부동산원 상권 분류명과 매칭되지 않음")
+                else:
                     cls_id = match.iloc[0]["CLS_ID"]
                     result["vacancy_label"] = f"중대형 상가 · {match.iloc[0]['CLS_FULLNM']}"
                     trend_df, _ = get_reb_vacancy_trend(reb_key, statbl_id, cls_id, "202403", used_quarter)
-                    if trend_df is not None and not trend_df.empty:
+                    if trend_df is None or trend_df.empty:
+                        result["notes"].append("공실률: 추이 데이터 없음")
+                    else:
                         trend_df = trend_df.sort_values("WRTTIME_IDTFR_ID")
                         for _, row in trend_df.iterrows():
                             wt = str(row["WRTTIME_IDTFR_ID"])
@@ -933,30 +943,40 @@ def _build_commercial(reb_key, sangkwon_key, dong_name, lon, lat):
                                 "label": f"{wt[2:4]}.Q{wt[4:]}",
                                 "value": round(float(row["DTA_VAL"]), 1),
                             })
-        except Exception:
-            pass
+        except Exception as e:
+            result["notes"].append(f"공실률: 조회 오류 ({e})")
 
-    if sangkwon_key and lon and lat:
+    if not sangkwon_key:
+        result["notes"].append("주변 상가업소: 소상공인시장진흥공단 인증키 미입력")
+    elif not (lon and lat):
+        result["notes"].append("주변 상가업소: 좌표(지오코딩) 실패로 조회 불가")
+    else:
         try:
             stores_df = get_nearby_stores(sangkwon_key, lon, lat, radius=500)
-            if stores_df is not None and not stores_df.empty and "indsLclsNm" in stores_df.columns:
+            if stores_df is None or stores_df.empty or "indsLclsNm" not in stores_df.columns:
+                result["notes"].append("주변 상가업소: 반경 500m 내 데이터 없음")
+            else:
                 counts = stores_df["indsSclsNm"].value_counts().head(5)
                 result["top_industries"] = [{"label": k, "value": int(v)} for k, v in counts.items()]
-        except Exception:
-            pass
+        except Exception as e:
+            result["notes"].append(f"주변 상가업소: 조회 오류 ({e})")
     return result
 
 
 def _build_seoul(seoul_key, lon, lat):
-    if not seoul_key or not lon or not lat:
-        return None, None
+    """반환값 3번째는 실패 사유(성공 시 None) — 서울 상권분석/상권영역 지도가 왜 빠졌는지
+    대시보드에 그대로 보여주기 위함."""
+    if not seoul_key:
+        return None, None, "서울 열린데이터광장 인증키 미입력"
+    if not lon or not lat:
+        return None, None, "좌표(지오코딩) 실패로 조회 불가"
     try:
         locations_df = get_seoul_trade_area_locations(seoul_key)
         if locations_df is None or locations_df.empty:
-            return None, None
+            return None, None, "서울시 상권 목록 응답이 비어 있음"
         trdar_row, dist_m = find_nearest_seoul_trade_area(locations_df, lon, lat)
         if dist_m > 1500:
-            return None, None
+            return None, None, f"가장 가까운 서울시 상권이 {dist_m:.0f}m 떨어져 있어(1.5km 초과) 매칭하지 않음"
         trdar_cd = trdar_row["TRDAR_CD"]
         name = trdar_row["TRDAR_CD_NM"]
 
@@ -997,9 +1017,9 @@ def _build_seoul(seoul_key, lon, lat):
 
         seoul_detail = {"name": name, "stats": stats, "top_industries": top_industries, "weekday": weekday}
         trade_area_map = {"name": name, "lat": trdar_row["lat"], "lon": trdar_row["lon"]}
-        return seoul_detail, trade_area_map
-    except Exception:
-        return None, None
+        return seoul_detail, trade_area_map, None
+    except Exception as e:
+        return None, None, f"조회 오류 ({e})"
 
 
 _SEISMIC_SHORT_LABELS = {
@@ -1131,30 +1151,46 @@ def fetch_report_data(
         seismic_full = str(seismic_list.iloc[0]["내진분류"])
         summary_stats.append({"label": "내진 설계", "value": _short_seismic_label(seismic_full), "sub": seismic_full})
 
+    # 어떤 섹션이 왜 빠졌는지(키 미입력/데이터 없음/API 오류) 대시보드에 그대로 보여주기 위한 메모.
+    notes = []
+    if not lon or not lat:
+        notes.append("위치·좌표: 지오코딩 실패 — 카카오맵/브이월드 키를 확인하세요 (지도·주변 상가업소·서울 상권분석에 영향)")
+
     _progress("동단위 시장 통계 분석 중...")
     data["district"] = _build_district(master)
+    if not data["district"]["age_buckets"]:
+        notes.append("동단위 시장 통계: 동 표제부 데이터를 가져오지 못했거나 비어 있음")
 
     _progress("실거래가 정리 중...")
     data["transactions"] = _build_transactions(master, months_lookback)
     if data["transactions"]["rows"]:
         latest = data["transactions"]["rows"][0]
         summary_stats.append({"label": "최근 실거래가", "value": latest[3], "sub": f"{latest[1]} · {latest[2]} · {latest[0]}"})
+    else:
+        notes.append(f"실거래가 동향: 최근 {months_lookback}개월 내 거래 내역 없음")
 
     _progress("공시가격 시계열 분석 중...")
     data["price_history"] = _build_price_history(master)
+    if not data["price_history"]["trend"]:
+        notes.append("공시가격 시계열: 시계열 데이터 없음")
 
     _progress("상업용부동산 공실률 · 주변 상가업소 조회 중...")
     data["commercial"] = _build_commercial(reb_key, sangkwon_key, dong_name, lon, lat)
+    notes.extend(data["commercial"].get("notes") or [])
     if data["commercial"]["vacancy_trend"]:
         summary_stats.append({"label": "공실률", "value": f"{data['commercial']['vacancy_trend'][-1]['value']}%", "sub": data["commercial"]["vacancy_label"]})
-    if data["commercial"]["top_industries"]:
-        pass
 
     is_seoul = sido.startswith("서울")
-    seoul_detail, trade_area_map = (None, None)
-    if is_seoul and seoul_key:
+    seoul_detail, trade_area_map = None, None
+    if not is_seoul:
+        notes.append("서울 상권분석·상권영역 지도: 서울 열린데이터광장 API는 서울 소재 주소만 지원 (해당 없음)")
+    elif not seoul_key:
+        notes.append("서울 상권분석·상권영역 지도: 서울 열린데이터광장 인증키 미입력")
+    else:
         _progress("서울 상권분석 데이터 조회 중... (최초 1회, 최대 1분 정도 걸릴 수 있습니다)")
-        seoul_detail, trade_area_map = _build_seoul(seoul_key, lon, lat)
+        seoul_detail, trade_area_map, seoul_reason = _build_seoul(seoul_key, lon, lat)
+        if seoul_reason:
+            notes.append(f"서울 상권분석·상권영역 지도: {seoul_reason}")
     data["seoul_trade_area"] = seoul_detail
     if seoul_detail and seoul_detail.get("stats"):
         summary_stats.append({"label": "상권 추정매출(월)", "value": seoul_detail["stats"][0]["value"], "sub": seoul_detail["name"]})
@@ -1167,6 +1203,7 @@ def fetch_report_data(
 
     data["summary_stats"] = summary_stats
     data["cover_stats"] = summary_stats[:3]
+    data["notes"] = notes
 
     toc_items_part1 = ["표지", "목차", "리포트 개요", "핵심 요약", "건축물 개요", "입지·상권 개관", "위치 및 입지"]
     toc_items_part2 = ["실거래가 동향", "동단위 시장 통계", "공시가격 시계열", "상권 개황"]

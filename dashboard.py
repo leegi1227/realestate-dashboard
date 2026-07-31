@@ -1446,6 +1446,7 @@ with tab_autopptx:
                     pptx_bytes = generate_pptx(report_data)
 
                 st.session_state.autopptx_result = (report_data["address"], pptx_bytes)
+                st.session_state.autopptx_notes = report_data.get("notes") or []
                 st.success(f"'{report_data['address']}' 리포트를 생성했습니다.")
             except Exception as e:
                 st.error(f"리포트 생성 실패: {e}")
@@ -1455,6 +1456,13 @@ with tab_autopptx:
     if result:
         addr_label, pptx_bytes = result
         st.caption(f"'{addr_label}' 리포트 ({len(pptx_bytes) / 1024:.0f} KB)")
+
+        notes = st.session_state.get("autopptx_notes") or []
+        if notes:
+            with st.expander(f"⚠️ {len(notes)}개 섹션이 비어 있습니다 — 이유 보기", expanded=False):
+                for n in notes:
+                    st.markdown(f"- {n}")
+
         # st.download_button은 Streamlit이 내부 /media/<id> URL로 파일을 서빙하고 브라우저가
         # 응답의 Content-Disposition 헤더를 읽어 파일명을 정하는데, Streamlit Community Cloud에서는
         # 이 헤더가 아예 안 실려서(확장자도 안 붙음) 임의의 UUID 이름으로 저장돼버렸다.
