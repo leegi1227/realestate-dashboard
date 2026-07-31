@@ -10,6 +10,7 @@ streamlit run dashboard.py
 http://localhost:8501 주소를 직접 열면 됩니다.
 """
 
+import datetime
 import io
 import math
 import os
@@ -1451,9 +1452,13 @@ with tab_autopptx:
     result = st.session_state.get("autopptx_result")
     if result:
         addr_label, pptx_bytes = result
+        st.caption(f"'{addr_label}' 리포트")
+        # 파일명에 한글이 들어가면 Streamlit Community Cloud가 Content-Disposition을
+        # 제대로 못 넘겨줘서 다운로드가 임의의 UUID 파일명으로 저장되는 문제가 있다
+        # (다른 다운로드 버튼들이 전부 영문 파일명을 쓰는 것도 같은 이유) — ASCII 파일명으로 우회.
+        file_name = f"realestate_analysis_report_{datetime.datetime.now():%Y%m%d_%H%M%S}.pptx"
         st.download_button(
-            "📥 pptx 다운로드", pptx_bytes,
-            f"{addr_label.replace(' ', '_')}_분석리포트.pptx",
+            "📥 pptx 다운로드", pptx_bytes, file_name,
             "application/vnd.openxmlformats-officedocument.presentationml.presentation",
             type="primary", width='stretch', key="autopptx_download",
         )
