@@ -56,15 +56,19 @@ from building_example import (
 )
 
 # ------------------------------------------------------------------
-# 색상 팔레트 / 글꼴 — 딥 네이비 베이스 + 비비드(인디고→핑크) 그라데이션 포인트
+# 색상 팔레트 / 글꼴 — 딥 네이비(지배색) + 웜 테라코타 그라데이션 포인트.
+# 부동산·시장데이터 리포트에 맞춰 무난한 파랑 대신 "무디 네이비 + 웜 테라코타"
+# 조합을 골랐다(2025년 트렌드: 차분한 다크 베이스에 따뜻한 단색 포인트 하나만
+# 강하게 주는 방식). 네이비가 화면의 대부분을 차지하는 지배색이고, 테라코타는
+# 통계 숫자·차트 강조색으로만 아껴 쓰는 단일 포인트다.
 # ------------------------------------------------------------------
 NAVY = RGBColor(0x16, 0x21, 0x3E)
 NAVY_DARK = RGBColor(0x0B, 0x12, 0x20)
 NAVY_LIGHT = RGBColor(0x2A, 0x39, 0x5C)
 ICE = RGBColor(0xE8, 0xEC, 0xF2)
-TERRACOTTA = RGBColor(0xA8, 0x55, 0xF7)  # 단색이 필요한 텍스트/얇은 선용 포인트(비비드 퍼플). 이름은 하위 호환을 위해 유지.
-GRADIENT_A = RGBColor(0x63, 0x66, 0xF1)  # 그라데이션 시작 — 인디고
-GRADIENT_B = RGBColor(0xEC, 0x48, 0x99)  # 그라데이션 끝 — 핑크
+TERRACOTTA = RGBColor(0xD9, 0x71, 0x3F)  # 단색 포인트(통계 숫자·강조 텍스트·차트 막대) — 실제 테라코타/코퍼 톤.
+GRADIENT_A = RGBColor(0x2B, 0x4C, 0x7E)  # 그라데이션 시작 — 딥 네이비블루
+GRADIENT_B = RGBColor(0xE2, 0x82, 0x5A)  # 그라데이션 끝 — 웜 테라코타/코럴
 WHITE = RGBColor(0xFF, 0xFF, 0xFF)
 TEXT_DARK = RGBColor(0x22, 0x26, 0x2E)
 MUTED = RGBColor(0x6B, 0x72, 0x80)
@@ -73,7 +77,7 @@ GRID_LINE = RGBColor(0xDC, 0xE1, 0xE8)
 
 
 def _gradient_fill(shape_or_chart_format, angle=45):
-    """비비드 그라데이션(인디고→핑크) 채우기. 배지·포인트바·차트 시리즈 등 강조 도형에 쓴다."""
+    """네이비블루→테라코타 그라데이션 채우기. 배지·포인트바·차트 시리즈 등 강조 도형에 쓴다."""
     fill = shape_or_chart_format.fill
     fill.gradient()
     stops = fill.gradient_stops
@@ -89,8 +93,35 @@ def _gradient_fill(shape_or_chart_format, angle=45):
 # 한글은 OS 기본 대체 글꼴(Windows에서는 사실상 맑은 고딕)로 표시된다.
 FONT_NAME = "Calibri"
 
-SLIDE_W_IN = 13.333
-SLIDE_H_IN = 7.5
+# 모든 슬라이드 함수의 x/y/w/h 리터럴은 원래 16:9(13.333×7.5in) 캔버스 기준으로
+# 짜여 있다. 실제 출력 크기를 A4 가로(297×210mm)로 바꾸면서 각 슬라이드 함수의
+# 좌표 자체는 그대로 두고, Inches()로 변환되는 시점에만 가로/세로 각각 다른
+# 배율(SCALE_X/SCALE_Y)을 곱해 새 캔버스에 여백 없이 꽉 차도록 늘린다 — 배율을
+# 하나로 통일하면(가로 기준으로만 맞추면) A4가 16:9보다 더 정방형에 가까운
+# 비율이라 아래쪽에 빈 여백이 크게 남는다. 원(뱃지·장식 동그라미)처럼 가로세로
+# 비율이 유지돼야 하는 도형만 SCALE_U(더 작은 쪽 배율)로 균일하게 스케일한다.
+DESIGN_W_IN = 13.333
+DESIGN_H_IN = 7.5
+SLIDE_W_IN = 11.69  # A4 가로 297mm
+SLIDE_H_IN = 8.27   # A4 가로 210mm
+SCALE_X = SLIDE_W_IN / DESIGN_W_IN
+SCALE_Y = SLIDE_H_IN / DESIGN_H_IN
+SCALE_U = min(SCALE_X, SCALE_Y)
+
+
+def _sx(v):
+    """디자인 그리드의 x좌표/가로폭 값을 실제 인치로 변환."""
+    return Inches(v * SCALE_X)
+
+
+def _sy(v):
+    """디자인 그리드의 y좌표/세로높이 값을 실제 인치로 변환."""
+    return Inches(v * SCALE_Y)
+
+
+def _su(v):
+    """원·정사각 배지처럼 가로세로 비율을 유지해야 하는 도형의 크기 변환."""
+    return Inches(v * SCALE_U)
 
 
 # ==================================================================
@@ -107,7 +138,7 @@ def _new_slide(prs, dark=False):
 def _textbox(slide, x, y, w, h, text, size=12, bold=False, color=TEXT_DARK,
              align=PP_ALIGN.LEFT, valign=MSO_ANCHOR.TOP, italic=False, font=FONT_NAME,
              line_spacing=None):
-    box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
+    box = slide.shapes.add_textbox(_sx(x), _sy(y), _sx(w), _sy(h))
     tf = box.text_frame
     tf.word_wrap = True
     tf.vertical_anchor = valign
@@ -130,7 +161,7 @@ def _textbox(slide, x, y, w, h, text, size=12, bold=False, color=TEXT_DARK,
 
 def _rich_textbox(slide, x, y, w, h, runs, align=PP_ALIGN.LEFT, valign=MSO_ANCHOR.MIDDLE):
     """runs: [(text, {size,bold,color}), ...] 한 줄에 여러 스타일을 섞어 쓸 때."""
-    box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
+    box = slide.shapes.add_textbox(_sx(x), _sy(y), _sx(w), _sy(h))
     tf = box.text_frame
     tf.word_wrap = True
     tf.vertical_anchor = valign
@@ -156,7 +187,7 @@ def _page_footer(slide, address, label):
 
 
 def _card(slide, x, y, w, h, fill=CARD_BG, line=GRID_LINE):
-    shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(y), Inches(w), Inches(h))
+    shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, _sx(x), _sy(y), _sx(w), _sy(h))
     shape.adjustments[0] = 0.08
     shape.fill.solid()
     shape.fill.fore_color.rgb = fill
@@ -171,10 +202,10 @@ def _add_picture_placeholder(slide, x, y, w, h, image_stream=None, idx=90):
     image_stream이 있으면(자동 생성 지도 등) 미리 채워 넣고, 없으면 빈 상자로 둔다 — 어느 쪽이든
     <p:ph type="pic">를 갖는 진짜 placeholder라서 파일탐색기에서 이미지를 끌어다 놓으면 그대로 바뀐다."""
     if image_stream is not None:
-        shape = slide.shapes.add_picture(image_stream, Inches(x), Inches(y), Inches(w), Inches(h))
+        shape = slide.shapes.add_picture(image_stream, _sx(x), _sy(y), _sx(w), _sy(h))
         nvPr = shape._element.find(qn("p:nvPicPr")).find(qn("p:nvPr"))
     else:
-        shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(x), Inches(y), Inches(w), Inches(h))
+        shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, _sx(x), _sy(y), _sx(w), _sy(h))
         shape.fill.solid()
         shape.fill.fore_color.rgb = CARD_BG
         shape.line.color.rgb = GRID_LINE
@@ -196,12 +227,12 @@ def _stat_card(slide, x, y, w, h, value, label, sub=None):
 
 def _table(slide, x, y, w, h, headers, rows, col_ratios=None, font_size=11):
     n_rows, n_cols = len(rows) + 1, len(headers)
-    gframe = slide.shapes.add_table(n_rows, n_cols, Inches(x), Inches(y), Inches(w), Inches(h))
+    gframe = slide.shapes.add_table(n_rows, n_cols, _sx(x), _sy(y), _sx(w), _sy(h))
     table = gframe.table
     if col_ratios:
         total = sum(col_ratios)
         for i, ratio in enumerate(col_ratios):
-            table.columns[i].width = Inches(w * ratio / total)
+            table.columns[i].width = _sx(w * ratio / total)
 
     def _fmt_cell(cell, text, bold, color, fill):
         cell.text = "" if text is None else str(text)
@@ -243,7 +274,7 @@ def _bar_chart(slide, x, y, w, h, categories, values, color, horizontal=False, n
     chart_data.categories = [str(c) for c in categories]
     chart_data.add_series("값", values)
     chart_type = XL_CHART_TYPE.BAR_CLUSTERED if horizontal else XL_CHART_TYPE.COLUMN_CLUSTERED
-    gframe = slide.shapes.add_chart(chart_type, Inches(x), Inches(y), Inches(w), Inches(h), chart_data)
+    gframe = slide.shapes.add_chart(chart_type, _sx(x), _sy(y), _sx(w), _sy(h), chart_data)
     chart = gframe.chart
     _style_chart_axes(chart)
     plot = chart.plots[0]
@@ -264,7 +295,7 @@ def _line_chart(slide, x, y, w, h, categories, values, color, num_fmt="0.0", lab
     chart_data = CategoryChartData()
     chart_data.categories = [str(c) for c in categories]
     chart_data.add_series("값", values)
-    gframe = slide.shapes.add_chart(XL_CHART_TYPE.LINE_MARKERS, Inches(x), Inches(y), Inches(w), Inches(h), chart_data)
+    gframe = slide.shapes.add_chart(XL_CHART_TYPE.LINE_MARKERS, _sx(x), _sy(y), _sx(w), _sy(h), chart_data)
     chart = gframe.chart
     _style_chart_axes(chart)
     plot = chart.plots[0]
@@ -291,7 +322,7 @@ def _cover_slide(prs, data):
         (9.6, 4.0, 5.5, 5.5, NAVY_DARK, False),
         (10.4, 4.8, 3.9, 3.9, None, True),
     ]:
-        ellipse = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(cx), Inches(cy), Inches(cw), Inches(ch))
+        ellipse = slide.shapes.add_shape(MSO_SHAPE.OVAL, _sx(cx), _sy(cy), _su(cw), _su(ch))
         if grad:
             _gradient_fill(ellipse, angle=45)
         else:
@@ -327,7 +358,7 @@ def _toc_slide(prs, data):
         iy = start_y + 0.55
         for item in part["items"]:
             badge_w = 0.4 if page_no >= 10 else 0.32
-            badge = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(iy), Inches(badge_w), Inches(0.32))
+            badge = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, _sx(x), _sy(iy), _su(badge_w), _su(0.32))
             badge.adjustments[0] = 0.2
             badge.fill.solid()
             badge.fill.fore_color.rgb = NAVY
@@ -354,7 +385,7 @@ def _section_divider_slide(prs, part_no, kicker, title, subtitle):
     """PART 구분용 다크 배경 슬라이드. 예전에는 manual_slides.pptx의 연남동 전용 슬라이드를
     그대로 복사했지만, 지금은 실제 법정동명을 넣은 일반 문장만 쓰는 코드 생성 버전이다."""
     slide = _new_slide(prs, dark=True)
-    ellipse = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(9.5), Inches(-2.0), Inches(6.5), Inches(6.5))
+    ellipse = slide.shapes.add_shape(MSO_SHAPE.OVAL, _sx(9.5), _sy(-2.0), _su(6.5), _su(6.5))
     ellipse.fill.solid()
     ellipse.fill.fore_color.rgb = NAVY_LIGHT
     ellipse.line.fill.background()
@@ -418,7 +449,7 @@ def _building_slide(prs, data):
         py = next_y + 0.4
         for z in b["zoning"][:5]:
             pw = min(right_w, 0.35 + len(z) * 0.16)
-            pill = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(right_x), Inches(py), Inches(pw), Inches(0.42))
+            pill = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, _sx(right_x), _sy(py), _sx(pw), _sy(0.42))
             pill.adjustments[0] = 0.5
             pill.fill.solid()
             pill.fill.fore_color.rgb = ICE
@@ -494,7 +525,7 @@ def _location_slide(prs, data):
     sy = 3.25
     for st_ in loc.get("subway", [])[:3]:
         _card(slide, rx, sy, rw, 0.85, fill=CARD_BG)
-        badge = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(rx + 0.18), Inches(sy + 0.2), Inches(0.44), Inches(0.44))
+        badge = slide.shapes.add_shape(MSO_SHAPE.OVAL, _sx(rx + 0.18), _sy(sy + 0.2), _su(0.44), _su(0.44))
         badge.fill.solid()
         badge.fill.fore_color.rgb = RGBColor.from_string(st_.get("color", "1E2A44").lstrip("#"))
         badge.line.color.rgb = WHITE
@@ -744,7 +775,7 @@ def _growth_drivers_slide(prs, data):
              size=10, italic=True, color=MUTED)
     y = 1.55
     for i, item in enumerate(items[:8]):
-        badge = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(0.6), Inches(y + 0.05), Inches(0.36), Inches(0.36))
+        badge = slide.shapes.add_shape(MSO_SHAPE.OVAL, _sx(0.6), _sy(y + 0.05), _su(0.36), _su(0.36))
         _gradient_fill(badge, angle=45)
         badge.line.fill.background()
         badge.shadow.inherit = False
@@ -854,7 +885,7 @@ def _appendix_slide(prs, data):
 
 def _conclusion_slide(prs, data):
     slide = _new_slide(prs, dark=True)
-    ellipse = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(-2.5), Inches(4.2), Inches(6.5), Inches(6.5))
+    ellipse = slide.shapes.add_shape(MSO_SHAPE.OVAL, _sx(-2.5), _sy(4.2), _su(6.5), _su(6.5))
     ellipse.fill.solid()
     ellipse.fill.fore_color.rgb = NAVY_LIGHT
     ellipse.line.fill.background()
@@ -863,7 +894,7 @@ def _conclusion_slide(prs, data):
     _textbox(slide, 0.9, 0.7, 8, 0.7, "종합 의견", size=32, bold=True, color=WHITE)
     cy = 1.9
     for i, point in enumerate(data.get("conclusion") or []):
-        badge = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(0.9), Inches(cy + 0.05), Inches(0.36), Inches(0.36))
+        badge = slide.shapes.add_shape(MSO_SHAPE.OVAL, _sx(0.9), _sy(cy + 0.05), _su(0.36), _su(0.36))
         _gradient_fill(badge, angle=45)
         badge.line.fill.background()
         badge.shadow.inherit = False
