@@ -59,6 +59,7 @@ from building_example import (
     SEOUL_TRDAR_FLPOP_SERVICE,
     SEOUL_TRDAR_WRC_POPLTN_SERVICE,
 )
+from ledger_ocr import extract_ledger_content
 
 # ------------------------------------------------------------------
 # 색상 팔레트 / 글꼴 — 딥 네이비(지배색) + 웜 테라코타 그라데이션 포인트.
@@ -1760,6 +1761,46 @@ def _ledger_multirow_slide(prs, address_label, title, df, cols):
     _page_footer(slide, address_label, title)
 
 
+def _ledger_owner_history_slide(prs, address_label, owners, changes):
+    """업로드한 열람본 이미지에서 OCR로 뽑은 소유자현황·변동사항을, 원본 사진 첨부 대신
+    이 리포트의 다른 슬라이드와 같은 표/텍스트 형식으로 정리해서 보여준다. 표 셀 인식이
+    무너진 OCR 결과라 이름 등이 오탈자로 나올 수 있어(예: '윤명분'->'륜령분') 그 사실을
+    슬라이드에 직접 명시한다 — 원본 이미지는 대시보드 화면 쪽에서 항상 대조 가능하다."""
+    slide = _new_slide(prs)
+    _section_title(slide, "소유자현황 · 변동사항")
+    _textbox(
+        slide, 0.6, 1.05, 11.5, 0.4,
+        "업로드한 건축물대장 열람본에서 OCR로 추출 — 공공 API에는 없는 정보이며, 표 인식 특성상 "
+        "오탈자가 있을 수 있어 정확한 값은 원본 이미지 대조를 권장합니다.",
+        size=10.5, color=MUTED, line_spacing=1.3,
+    )
+
+    left_x, left_w = 0.6, 5.6
+    _textbox(slide, left_x, 1.6, left_w, 0.35, "소유자현황", size=13, bold=True, color=NAVY)
+    if owners:
+        rows = [[o["성명"], o["변동일"]] for o in owners]
+        _table(slide, left_x, 2.0, left_w, min(3.0, 0.5 * (len(rows) + 1)), ["성명", "변동일"], rows,
+               col_ratios=[2, 1], font_size=12)
+    else:
+        _card(slide, left_x, 2.0, left_w, 1.0)
+        _textbox(slide, left_x + 0.25, 2.2, left_w - 0.5, 0.6,
+                 "OCR로 소유자 정보를 특정하지 못했습니다. 원본 이미지를 확인하세요.", size=11, color=MUTED)
+
+    right_x, right_w = 6.5, 6.2
+    _textbox(slide, right_x, 1.6, right_w, 0.35, "변동사항", size=13, bold=True, color=NAVY)
+    if changes:
+        card_h = min(5.0, 0.5 + 0.55 * len(changes))
+        _card(slide, right_x, 2.0, right_w, card_h)
+        _textbox(slide, right_x + 0.25, 2.15, right_w - 0.5, card_h - 0.3,
+                 "\n".join(f"· {c}" for c in changes), size=10, line_spacing=1.4)
+    else:
+        _card(slide, right_x, 2.0, right_w, 1.0)
+        _textbox(slide, right_x + 0.25, 2.2, right_w - 0.5, 0.6,
+                 "OCR로 변동사항을 특정하지 못했습니다. 원본 이미지를 확인하세요.", size=11, color=MUTED)
+
+    _page_footer(slide, address_label, "소유자현황 · 변동사항")
+
+
 _LEDGER_DATA_SOURCES = [
     "국토교통부 건축HUB 건축물대장정보 서비스 (표제부 · 총괄표제부 · 층별개요 · 지역지구구역 · "
     "오수정화시설 · 주택가격 · 부속지번 · 전유공용면적 등)",
@@ -1769,7 +1810,9 @@ _LEDGER_APPENDIX_DISCLAIMER = (
     "· 본 리포트는 건축HUB Open API 응답을 자동 정리한 참고 자료이며, 법적 효력이 있는 건축물대장 발급 문서가 아닙니다.\n"
     "· 위반건축물 여부 · 소유자현황 · 변동사항은 이 공공 API에 해당 필드가 없어 표시되지 않습니다"
     "(소유자 오픈API는 2026년 기준 data.go.kr에서 서비스 종료). 정확한 확인은 정부24 건축물대장 열람/발급을 이용하세요.\n"
-    "· 사이드바에 열람본 이미지를 업로드했다면, 위 항목은 이 리포트 뒤쪽 첨부 슬라이드의 원본 이미지로 확인할 수 있습니다."
+    "· 사이드바에 열람본 이미지를 업로드했다면, 위 항목은 이 리포트의 '소유자현황 · 변동사항' 슬라이드에서 OCR로 "
+    "정리한 값을 볼 수 있습니다 — 표 셀 인식 특성상 오탈자가 있을 수 있으니, 정확한 값은 대시보드에 표시된 원본 "
+    "이미지와 대조하세요."
 )
 
 
@@ -1803,9 +1846,9 @@ def generate_ledger_pptx(report: dict, address_label: str, ledger_docs=None) -> 
             cols = [c for c in _MULTIROW_KEEP_COLS.get(ledger_type, []) if c in df.columns] or list(df.columns)
             _ledger_multirow_slide(prs, address_label, ledger_type, df, cols)
 
-    for att in (ledger_docs or []):
-        render = _ledger_attachment_slide_factory(att)
-        render(prs, {"address": address_label})
+    if ledger_docs:
+        content = extract_ledger_content(ledger_docs)
+        _ledger_owner_history_slide(prs, address_label, content["owners"], content["changes"])
 
     _ledger_appendix_slide(prs, address_label)
 
