@@ -56,7 +56,7 @@ from building_example import (
     reverse_match_transactions,
     split_common_and_varying,
 )
-from report_generator import fetch_report_data, generate_pptx
+from report_generator import fetch_report_data, generate_ledger_pptx, generate_pptx
 
 try:
     from ledger_ocr import analyze_ledger_image
@@ -653,15 +653,29 @@ with tab_report:
         if summary_src is not None:
             addr_label = summary_src.get("도로명대지위치") or summary_src.get("대지위치", "") or ""
 
-        col_pdf, col_xlsx = st.columns(2)
+        col_pptx, col_pdf, col_xlsx = st.columns(3)
+        try:
+            pptx_bytes = generate_ledger_pptx(
+                report, address_label=addr_label, ledger_docs=st.session_state.get("ledger_docs"),
+            )
+            col_pptx.download_button(
+                "📑 종합 리포트 PPTX 다운로드 (표지·차트 포함)",
+                pptx_bytes,
+                "building_full_report.pptx",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                type="primary",
+                width='stretch',
+            )
+        except Exception as e:
+            col_pptx.error(f"PPTX 생성 실패: {e}")
+
         try:
             pdf_bytes = generate_pdf_report(report, address_label=addr_label)
             col_pdf.download_button(
-                "📄 종합 리포트 PDF 다운로드 (한 문서로 이어짐)",
+                "📄 간단 요약 PDF 다운로드",
                 pdf_bytes,
                 "building_full_report.pdf",
                 "application/pdf",
-                type="primary",
                 width='stretch',
             )
         except Exception as e:

@@ -42,6 +42,10 @@ from building_example import (
     combine_zoning_sources,
     extract_year,
     get_building_ledger,
+    _CORE_FIELD_LABELS,
+    _MULTIROW_KEEP_COLS,
+    _ONE_LINE_FIELDS,
+    _clean,
     get_nearby_stores,
     get_reb_vacancy_snapshot,
     get_reb_vacancy_trend,
@@ -1595,3 +1599,211 @@ def fetch_report_data(
         )
 
     return data
+
+
+# ==================================================================
+# 종합 리포트 탭 전용 pptx — 11종 건축물대장(report dict)을 자동pptx 리포트와
+# 같은 디자인 시스템으로 여러 장짜리 문서로 그린다. 예전엔 fpdf2로 항목을
+# 나열한 1페이지짜리 흑백 표(generate_pdf_report, building_example.py)였는데,
+# "자동pptx 리포트 탭처럼 전문적으로" 요청받아 같은 네이비/테라코타 톤·카드·
+# 차트 컴포넌트를 재사용해 별도 생성기로 새로 만들었다. fetch_report_data()가
+# 쓰는 market-report용 data dict/_slide_plan 구조와는 무관한, report(=ledger_type
+# -> DataFrame) 하나만 입력으로 받는 독립된 흐름이다.
+# ==================================================================
+def _ledger_core_row(report):
+    for key in ("표제부", "총괄표제부", "기본개요"):
+        df = report.get(key)
+        if df is not None and not df.empty and "오류" not in df.columns:
+            return df.iloc[0]
+    return None
+
+
+def _ledger_cover_slide(prs, address_label, core_row, report_date):
+    slide = _new_slide(prs, dark=True)
+    for cx, cy, cw, ch, color, grad in [
+        (8.6, 3.0, 7.5, 7.5, NAVY_LIGHT, False),
+        (9.6, 4.0, 5.5, 5.5, NAVY_DARK, False),
+        (10.4, 4.8, 3.9, 3.9, None, True),
+    ]:
+        ellipse = slide.shapes.add_shape(MSO_SHAPE.OVAL, _sx(cx), _sy(cy), _su(cw), _su(ch))
+        if grad:
+            _gradient_fill(ellipse, angle=45)
+        else:
+            ellipse.fill.solid()
+            ellipse.fill.fore_color.rgb = color
+        ellipse.line.fill.background()
+        ellipse.shadow.inherit = False
+
+    _textbox(slide, 0.9, 2.35, 8, 0.4, "건축물대장 종합 리포트", size=14, bold=True, color=TERRACOTTA)
+    _textbox(slide, 0.9, 2.8, 9.5, 1.6, address_label, size=36, bold=True, color=WHITE)
+    _textbox(slide, 0.9, 4.05, 9, 0.5, "표제부 · 층별개요 · 지역지구구역 등 공부 원본 데이터 기준", size=16, color=ICE)
+
+    stats = []
+    if core_row is not None:
+        if _clean(core_row.get("연면적")):
+            stats.append((f"{_clean(core_row.get('연면적'))}㎡", "연면적"))
+        if _clean(core_row.get("사용승인일")):
+            stats.append((_clean(core_row.get("사용승인일")), "사용승인일"))
+        if _clean(core_row.get("용적률")):
+            stats.append((f"{_clean(core_row.get('용적률'))}%", "용적률"))
+    for i, (value, label) in enumerate(stats[:3]):
+        cx = 0.9 + i * 2.9
+        _textbox(slide, cx, 5.5, 2.6, 0.55, value, size=22, bold=True, color=TERRACOTTA)
+        _textbox(slide, cx, 6.05, 2.6, 0.5, label, size=10.5, color=ICE)
+
+    _textbox(slide, 0.9, 6.7, 6, 0.4, report_date, size=11, color=MUTED)
+    return slide
+
+
+def _ledger_overview_slide(prs, address_label, core_row, report):
+    slide = _new_slide(prs)
+    _section_title(slide, "건축물 개요")
+
+    left_x, left_y, left_w, left_h = 0.6, 1.3, 6.7, 5.6
+    _card(slide, left_x, left_y, left_w, left_h)
+    core = []
+    if core_row is not None:
+        for col, label in _CORE_FIELD_LABELS:
+            val = _clean(core_row.get(col))
+            if val:
+                core.append((label, val))
+    if core:
+        row_h = (left_h - 0.4) / max(1, math.ceil(len(core) / 2))
+        for i, (label, value) in enumerate(core):
+            col, row = i % 2, i // 2
+            x = left_x + 0.3 + col * (left_w / 2 - 0.15)
+            y = left_y + 0.25 + row * row_h
+            _textbox(slide, x, y, left_w / 2 - 0.5, row_h * 0.42, label, size=10.5, color=MUTED)
+            _textbox(slide, x, y + row_h * 0.38, left_w / 2 - 0.5, row_h * 0.5, value, size=14, bold=True, color=NAVY)
+    else:
+        _textbox(slide, left_x + 0.3, left_y + 0.3, left_w - 0.6, 0.6, "표제부 데이터가 없습니다.", size=12, color=MUTED)
+
+    right_x, right_w = 7.5, 5.2
+    next_y = 1.3
+    zoning_df = report.get("지역지구구역")
+    if zoning_df is not None and not zoning_df.empty and "오류" not in zoning_df.columns and "지역지구구역코드명" in zoning_df.columns:
+        zoning = [z for z in (_clean(v) for v in zoning_df["지역지구구역코드명"]) if z]
+        if zoning:
+            _textbox(slide, right_x, next_y, right_w, 0.35, "용도지역 · 지구", size=13, bold=True, color=NAVY)
+            py = next_y + 0.4
+            for z in zoning[:5]:
+                pw = min(right_w, 0.35 + len(z) * 0.16)
+                pill = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, _sx(right_x), _sy(py), _sx(pw), _sy(0.42))
+                pill.adjustments[0] = 0.5
+                pill.fill.solid()
+                pill.fill.fore_color.rgb = ICE
+                pill.line.fill.background()
+                pill.shadow.inherit = False
+                tf = pill.text_frame
+                tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0
+                tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+                p = tf.paragraphs[0]
+                p.alignment = PP_ALIGN.CENTER
+                run = p.add_run()
+                run.text = z
+                run.font.size = Pt(10.5)
+                run.font.name = FONT_NAME
+                run.font.color.rgb = NAVY
+                py += 0.55
+            next_y = py + 0.3
+
+    one_liners = []
+    for ledger_type, cols in _ONE_LINE_FIELDS.items():
+        df = report.get(ledger_type)
+        if df is None or df.empty or "오류" in df.columns:
+            continue
+        row = df.iloc[0]
+        parts = [f"{c}: {_clean(row[c])}" for c in cols if c in df.columns and _clean(row[c])]
+        if parts:
+            one_liners.append(f"{ledger_type} — " + " · ".join(parts))
+    if one_liners:
+        _textbox(slide, right_x, next_y, right_w, 0.35, "기타 공부 정보", size=13, bold=True, color=NAVY)
+        _textbox(slide, right_x, next_y + 0.4, right_w, 2.0, "\n".join(one_liners), size=11, line_spacing=1.35)
+
+    _page_footer(slide, address_label, "건축물 개요")
+
+
+def _ledger_floor_slide(prs, address_label, report):
+    df = report.get("층별개요")
+    if df is None or df.empty or "오류" in df.columns or "면적" not in df.columns:
+        return False
+    d = df.copy()
+    d["_면적"] = pd.to_numeric(d["면적"], errors="coerce")
+    d = d[d["_면적"].notna() & (d["_면적"] > 0)]
+    if d.empty:
+        return False
+
+    slide = _new_slide(prs)
+    _section_title(slide, "층별현황")
+    cats = [str(v) for v in d["층번호명"]] if "층번호명" in d.columns else [str(i + 1) for i in range(len(d))]
+    vals = [round(float(v), 1) for v in d["_면적"]]
+    chart = _bar_chart(slide, 0.6, 1.3, 6.2, 5.6, cats, vals, TERRACOTTA, horizontal=True)
+    _gradient_fill(chart.plots[0].series[0].format, angle=0)
+
+    cols = [c for c in _MULTIROW_KEEP_COLS["층별개요"] if c in d.columns]
+    rows = [[_clean(v) for v in row] for row in d[cols].itertuples(index=False)]
+    _table(slide, 7.1, 1.3, 5.6, min(5.6, 0.5 * (len(rows) + 1)), cols, rows, font_size=10.5)
+    _page_footer(slide, address_label, "층별현황")
+    return True
+
+
+def _ledger_multirow_slide(prs, address_label, title, df, cols):
+    cols = cols or list(df.columns)
+    rows = [[_clean(v) for v in row] for row in df[cols].itertuples(index=False)]
+    slide = _new_slide(prs)
+    _section_title(slide, title)
+    _table(slide, 0.6, 1.3, 12.1, min(5.6, 0.5 * (len(rows) + 1)), cols, rows, font_size=11.5)
+    _page_footer(slide, address_label, title)
+
+
+_LEDGER_DATA_SOURCES = [
+    "국토교통부 건축HUB 건축물대장정보 서비스 (표제부 · 총괄표제부 · 층별개요 · 지역지구구역 · "
+    "오수정화시설 · 주택가격 · 부속지번 · 전유공용면적 등)",
+]
+
+_LEDGER_APPENDIX_DISCLAIMER = (
+    "· 본 리포트는 건축HUB Open API 응답을 자동 정리한 참고 자료이며, 법적 효력이 있는 건축물대장 발급 문서가 아닙니다.\n"
+    "· 위반건축물 여부 · 소유자현황 · 변동사항은 이 공공 API에 해당 필드가 없어 표시되지 않습니다"
+    "(소유자 오픈API는 2026년 기준 data.go.kr에서 서비스 종료). 정확한 확인은 정부24 건축물대장 열람/발급을 이용하세요.\n"
+    "· 사이드바에 열람본 이미지를 업로드했다면, 위 항목은 이 리포트 뒤쪽 첨부 슬라이드의 원본 이미지로 확인할 수 있습니다."
+)
+
+
+def _ledger_appendix_slide(prs, address_label):
+    slide = _new_slide(prs)
+    _section_title(slide, "부록 — 데이터 출처 및 유의사항")
+    _textbox(slide, 0.6, 1.3, 11.5, 0.35, "데이터 출처", size=13, bold=True, color=NAVY)
+    _textbox(slide, 0.6, 1.7, 11.5, 1.0, "\n".join(f"· {s}" for s in _LEDGER_DATA_SOURCES), size=12, line_spacing=1.35)
+    _textbox(slide, 0.6, 3.0, 11.5, 0.35, "유의사항", size=13, bold=True, color=NAVY)
+    _textbox(slide, 0.6, 3.4, 11.5, 2.6, _LEDGER_APPENDIX_DISCLAIMER, size=11, color=MUTED, line_spacing=1.4)
+    _page_footer(slide, address_label, "부록")
+
+
+def generate_ledger_pptx(report: dict, address_label: str, ledger_docs=None) -> bytes:
+    """종합 리포트 탭(11종 건축물대장 조회 결과)을 여러 장짜리 pptx로 그려 바이트로 반환."""
+    prs = Presentation()
+    prs.slide_width = Inches(SLIDE_W_IN)
+    prs.slide_height = Inches(SLIDE_H_IN)
+
+    core_row = _ledger_core_row(report)
+    report_date = datetime.date.today().strftime("%Y년 %m월 %d일 기준")
+
+    _ledger_cover_slide(prs, address_label, core_row, report_date)
+    _ledger_overview_slide(prs, address_label, core_row, report)
+    _ledger_floor_slide(prs, address_label, report)
+
+    for ledger_type in ("전유공용면적", "부속지번"):
+        df = report.get(ledger_type)
+        if df is not None and not df.empty and "오류" not in df.columns:
+            cols = [c for c in _MULTIROW_KEEP_COLS.get(ledger_type, []) if c in df.columns] or list(df.columns)
+            _ledger_multirow_slide(prs, address_label, ledger_type, df, cols)
+
+    for att in (ledger_docs or []):
+        render = _ledger_attachment_slide_factory(att)
+        render(prs, {"address": address_label})
+
+    _ledger_appendix_slide(prs, address_label)
+
+    buf = io.BytesIO()
+    prs.save(buf)
+    return buf.getvalue()
