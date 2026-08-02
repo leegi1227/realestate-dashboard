@@ -41,6 +41,43 @@ from PublicDataReader import TransactionPrice, BuildingLedger, code_bdong
 
 requests.packages.urllib3.disable_warnings()
 
+
+def _rewrite_meta_dict_to_https(node):
+    """PublicDataReader가 meta_dict에 하드코딩한 http:// URL을 재귀적으로 https://로 바꾼다.
+
+    2026-08-02 관찰: apis.data.go.kr의 평문 HTTP(포트 80) 요청이 매번
+    15초 타임아웃(가끔은 순수 'Unauthorized' 401)으로 실패하는데, 같은
+    요청을 https://로만 바꾸면 즉시 정상 응답한다 — data.go.kr이 HTTP
+    엔드포인트를 사실상 막아둔 것으로 보인다. PublicDataReader 1.1.1.post2
+    (BuildingLedger·TransactionPrice 둘 다)는 meta_dict에 http:// URL을
+    하드코딩해서 만들기 때문에, 라이브러리 코드를 고치는 대신 인스턴스
+    생성 직후 meta_dict를 이렇게 패치한다.
+    """
+    if isinstance(node, dict):
+        url = node.get("url")
+        if isinstance(url, str) and url.startswith("http://"):
+            node["url"] = "https://" + url[len("http://"):]
+        for value in node.values():
+            _rewrite_meta_dict_to_https(value)
+
+
+_ORIG_BUILDING_LEDGER_INIT = BuildingLedger.__init__
+_ORIG_TRANSACTION_PRICE_INIT = TransactionPrice.__init__
+
+
+def _https_patched_building_ledger_init(self, *args, **kwargs):
+    _ORIG_BUILDING_LEDGER_INIT(self, *args, **kwargs)
+    _rewrite_meta_dict_to_https(self.meta_dict)
+
+
+def _https_patched_transaction_price_init(self, *args, **kwargs):
+    _ORIG_TRANSACTION_PRICE_INIT(self, *args, **kwargs)
+    _rewrite_meta_dict_to_https(self.meta_dict)
+
+
+BuildingLedger.__init__ = _https_patched_building_ledger_init
+TransactionPrice.__init__ = _https_patched_transaction_price_init
+
 # ========================= 설정 (여기만 수정) =========================
 # 서비스키는 소스에 직접 적지 말고 환경변수로 주입한다 (공개 저장소 유출 방지).
 # Windows: set BUILDING_LEDGER_SERVICE_KEY=발급받은_키
