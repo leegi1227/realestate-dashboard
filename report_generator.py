@@ -1618,7 +1618,7 @@ def _ledger_core_row(report):
     return None
 
 
-def _ledger_cover_slide(prs, address_label, core_row, report_date):
+def _ledger_cover_slide(prs, address_label, core_row, report_date, has_violation=False):
     slide = _new_slide(prs, dark=True)
     for cx, cy, cw, ch, color, grad in [
         (8.6, 3.0, 7.5, 7.5, NAVY_LIGHT, False),
@@ -1637,6 +1637,8 @@ def _ledger_cover_slide(prs, address_label, core_row, report_date):
     _textbox(slide, 0.9, 2.35, 8, 0.4, "건축물대장 종합 리포트", size=14, bold=True, color=TERRACOTTA)
     _textbox(slide, 0.9, 2.8, 9.5, 1.6, address_label, size=36, bold=True, color=WHITE)
     _textbox(slide, 0.9, 4.05, 9, 0.5, "표제부 · 층별개요 · 지역지구구역 등 공부 원본 데이터 기준", size=16, color=ICE)
+    if has_violation:
+        _textbox(slide, 0.9, 4.55, 9, 0.4, "🚩 업로드한 열람본에서 위반건축물 표기 감지됨", size=13, bold=True, color=TERRACOTTA)
 
     stats = []
     if core_row is not None:
@@ -1655,7 +1657,7 @@ def _ledger_cover_slide(prs, address_label, core_row, report_date):
     return slide
 
 
-def _ledger_overview_slide(prs, address_label, core_row, report):
+def _ledger_overview_slide(prs, address_label, core_row, report, has_violation=False):
     slide = _new_slide(prs)
     _section_title(slide, "건축물 개요")
 
@@ -1667,6 +1669,8 @@ def _ledger_overview_slide(prs, address_label, core_row, report):
             val = _clean(core_row.get(col))
             if val:
                 core.append((label, val))
+    if has_violation:
+        core.append(("위반건축물", "⚠ 있음 (업로드 문서 기준)"))
     if core:
         row_h = (left_h - 0.4) / max(1, math.ceil(len(core) / 2))
         for i, (label, value) in enumerate(core):
@@ -1787,9 +1791,10 @@ def generate_ledger_pptx(report: dict, address_label: str, ledger_docs=None) -> 
 
     core_row = _ledger_core_row(report)
     report_date = datetime.date.today().strftime("%Y년 %m월 %d일 기준")
+    has_violation = any(doc.get("is_violation") for doc in (ledger_docs or []))
 
-    _ledger_cover_slide(prs, address_label, core_row, report_date)
-    _ledger_overview_slide(prs, address_label, core_row, report)
+    _ledger_cover_slide(prs, address_label, core_row, report_date, has_violation=has_violation)
+    _ledger_overview_slide(prs, address_label, core_row, report, has_violation=has_violation)
     _ledger_floor_slide(prs, address_label, report)
 
     for ledger_type in ("전유공용면적", "부속지번"):

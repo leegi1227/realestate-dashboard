@@ -636,6 +636,9 @@ with tab_report:
             st.subheader("📌 요약")
             addr = summary_src.get("도로명대지위치") or summary_src.get("대지위치", "")
             st.markdown(f"**{addr}** · {summary_src.get('건물명', '') or '(건물명 없음)'}")
+            _ledger_docs_for_summary = st.session_state.get("ledger_docs") or []
+            if any(d["is_violation"] for d in _ledger_docs_for_summary):
+                st.error("🚩 업로드한 건축물대장 열람본에서 '위반건축물' 표기가 감지됐습니다. (아래 첨부 이미지 참고)")
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("주용도", summary_src.get("주용도코드명", "-"))
             m2.metric("구조", summary_src.get("구조코드명", "-"))
