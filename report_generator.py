@@ -24,6 +24,7 @@ import math
 import os
 
 import pandas as pd
+from PIL import Image
 from pptx import Presentation
 from pptx.util import Inches, Pt, Emu
 from pptx.dml.color import RGBColor
@@ -873,6 +874,30 @@ _APPENDIX_DISCLAIMER = (
 )
 
 
+def _ledger_attachment_slide_factory(attachment):
+    """업로드된 건축물대장 열람본 이미지 1장을 그대로 붙여넣는 슬라이드를 만든다.
+    위반건축물 여부·소유자현황·변동사항은 공공API로 제공되지 않아, 사용자가 업로드한
+    원본 이미지를 리포트에 그대로 첨부하는 것이 가장 정확하다(OCR 요약으로 대체하지 않음)."""
+    def render(prs, data):
+        slide = _new_slide(prs)
+        label = f"첨부 — 건축물대장 열람본 ({attachment['filename']})" if attachment.get("filename") else "첨부 — 건축물대장 열람본"
+        _section_title(slide, label)
+        if attachment.get("is_violation"):
+            _textbox(slide, 0.6, 1.1, 11.5, 0.35, "🚩 위반건축물 표기 감지됨", size=13, bold=True, color=TERRACOTTA)
+
+        box_x, box_y, box_w, box_h = 0.6, 1.55, 12.1, 5.4
+        img_stream = io.BytesIO(attachment["image_bytes"])
+        with Image.open(io.BytesIO(attachment["image_bytes"])) as im:
+            img_w, img_h = im.size
+        scale = min(box_w / img_w, box_h / img_h)
+        draw_w, draw_h = img_w * scale, img_h * scale
+        draw_x = box_x + (box_w - draw_w) / 2
+        draw_y = box_y + (box_h - draw_h) / 2
+        slide.shapes.add_picture(img_stream, _sx(draw_x), _sy(draw_y), _sx(draw_w), _sy(draw_h))
+        _page_footer(slide, data["address"], "건축물대장 열람본 (업로드, 참고용)")
+    return render
+
+
 def _appendix_slide(prs, data):
     slide = _new_slide(prs)
     _section_title(slide, "부록 — 데이터 출처 및 유의사항")
@@ -925,6 +950,7 @@ def _slide_plan(data):
     dist = data.get("district") or {}
     com = data.get("commercial") or {}
     swot = data.get("swot") or {}
+    attachments = data.get("ledger_attachments") or []
 
     return [
         (1, "핵심 요약", _summary_slide),
@@ -947,6 +973,10 @@ def _slide_plan(data):
         (3, "SWOT 분석", _swot_slide) if any(swot.get(k) for k in ("strengths", "weaknesses", "opportunities", "threats")) else None,
         (3, "핵심지표 종합 비교표", _key_metrics_table_slide),
         (3, "종합 의견", _conclusion_slide),
+    ] + [
+        (3, f"건축물대장 열람본 첨부 {i + 1}", _ledger_attachment_slide_factory(att))
+        for i, att in enumerate(attachments)
+    ] + [
         (3, "부록 — 데이터 출처 및 유의사항", _appendix_slide),
     ]
 
@@ -1348,7 +1378,8 @@ def _build_conclusion(master, data):
 def fetch_report_data(
     *, service_key, sido, sigungu_name, dong_name, sigungu_code, bdong_code, bun, ji,
     kakao_key=None, vworld_key=None, reb_key=None, sangkwon_key=None, seoul_key=None,
-    months_lookback=12, growth_drivers_text=None, swot_text=None, progress_callback=None,
+    months_lookback=12, growth_drivers_text=None, swot_text=None, ledger_docs=None,
+    progress_callback=None,
 ) -> dict:
     """주소(시군구/법정동/번지) 하나에 대해 실제 데이터를 모아 generate_pptx()용 딕셔너리로 반환."""
     from PublicDataReader import BuildingLedger, TransactionPrice
@@ -1401,6 +1432,12 @@ def fetch_report_data(
         floors_base = core_row.get("지하층수")
         if floors_top or floors_base:
             core_list.append(("지상/지하층수", f"{floors_top or 0}층 / {floors_base or 0}층"))
+
+    # 위반건축물 여부는 건축HUB Open API에 없는 필드라, 사이드바에서 업로드한 열람본
+    # 이미지의 OCR 감지 결과로만 알 수 있다 — 감지되면 개요 카드에 눈에 띄게 추가한다.
+    ledger_docs = ledger_docs or []
+    if any(doc.get("is_violation") for doc in ledger_docs):
+        core_list.append(("위반건축물", "⚠ 있음 (업로드 문서 기준)"))
 
     zoning = combine_zoning_sources(master)
 
@@ -1549,5 +1586,12 @@ def fetch_report_data(
 
     _progress("종합 의견 정리 중...")
     data["conclusion"] = _build_conclusion(master, data)
+
+    data["ledger_attachments"] = ledger_docs
+    if ledger_docs:
+        data["notes"].append(
+            f"업로드한 건축물대장 열람본 {len(ledger_docs)}장을 리포트 끝에 원본 그대로 첨부했습니다. "
+            "위반건축물 여부는 OCR로 자동 감지했지만, 소유자현황·변동사항은 첨부 이미지를 직접 확인하세요."
+        )
 
     return data

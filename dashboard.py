@@ -58,6 +58,11 @@ from building_example import (
 )
 from report_generator import fetch_report_data, generate_pptx
 
+try:
+    from ledger_ocr import analyze_ledger_image
+except ImportError:
+    analyze_ledger_image = None
+
 
 # Leaflet + OpenStreetMap을 삽입하는 Custom Components v2 컴포넌트 (기존 pydeck
 # 렌더링을 대체). 처음에는 카카오맵 JS SDK로 구현했으나, 배포 환경에서 SDK 요청이
@@ -414,6 +419,38 @@ with st.sidebar:
     )
     seoul_key = seoul_key.strip() if seoul_key else None
 
+    st.divider()
+    st.caption(
+        "📎 건축물대장 열람본 이미지 업로드 (선택) — 위반건축물 여부·소유자현황·변동사항은 "
+        "공공데이터 API에 없어서, 정부24 등에서 발급받은 갑/을 이미지를 올리면 여기서 함께 확인합니다."
+    )
+    _ledger_files = st.file_uploader(
+        "건축물대장 갑/을 이미지 (여러 장 가능)",
+        type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="ledger_upload",
+        label_visibility="collapsed",
+    )
+    ledger_docs = []
+    if _ledger_files:
+        if analyze_ledger_image is None:
+            st.caption("⚠️ 이 기능에 필요한 패키지(Pillow/numpy/pytesseract)가 설치되지 않았습니다.")
+        else:
+            _ledger_cache = st.session_state.setdefault("_ledger_ocr_cache", {})
+            for _f in _ledger_files:
+                _file_bytes = _f.getvalue()
+                _cache_key = (_f.name, len(_file_bytes))
+                if _cache_key not in _ledger_cache:
+                    with st.spinner(f"'{_f.name}' 텍스트 인식 중..."):
+                        _ledger_cache[_cache_key] = analyze_ledger_image(_file_bytes, _f.name)
+                ledger_docs.append(_ledger_cache[_cache_key])
+            _n_violation = sum(1 for d in ledger_docs if d["is_violation"])
+            if _n_violation:
+                st.warning(f"🚩 업로드한 {len(ledger_docs)}장 중 {_n_violation}장에서 '위반건축물' 표기가 감지됐습니다.")
+            else:
+                st.caption(f"{len(ledger_docs)}장 업로드됨 (위반건축물 표기는 감지되지 않음)")
+            if not ledger_docs[0]["ocr_available"]:
+                st.caption(f"⚠️ {ledger_docs[0]['ocr_message']}")
+    st.session_state.ledger_docs = ledger_docs
+
     st.caption("주소 (서울특별시 + 구 + 동)")
     _addr_sigungu_df = _load_sigungu_list()
     _addr_seoul_gu_df = _addr_sigungu_df[_addr_sigungu_df["시도명"] == "서울특별시"].reset_index(drop=True)
@@ -449,6 +486,35 @@ def _resolve_codes():
         f"(시군구코드={addr_sigungu_code}, 법정동코드={bdong_code})"
     )
     return addr_sigungu_code, bdong_code, "서울특별시", addr_gu
+
+
+def _render_ledger_docs_section(ledger_docs):
+    """사이드바에서 업로드한 건축물대장 열람본 이미지를, 공공API로는 안 나오는
+    위반건축물 여부/소유자현황/변동사항을 확인하는 용도로 각 탭에 이어서 보여준다."""
+    if not ledger_docs:
+        return
+    st.divider()
+    st.subheader("📎 업로드한 건축물대장 열람본")
+    st.caption(
+        "위반건축물 여부·소유자현황·변동사항은 공공데이터 API에 없는 정보라 "
+        "업로드한 이미지로 직접 확인합니다. OCR 텍스트는 오탈자가 있을 수 있는 참고용이며, "
+        "정확한 값은 옆의 원본 이미지로 대조하세요."
+    )
+    for doc in ledger_docs:
+        col_img, col_info = st.columns([1, 1])
+        col_img.image(doc["image_bytes"], caption=doc["filename"], width='stretch')
+        with col_info:
+            if doc["is_violation"]:
+                st.error("🚩 위반건축물 표기 감지됨")
+            else:
+                st.success("위반건축물 표기 감지되지 않음")
+            if not doc["ocr_available"]:
+                st.caption(f"⚠️ {doc['ocr_message']}")
+            elif doc["raw_text"].strip():
+                with st.expander("OCR 원문 텍스트 (검색/복사용)"):
+                    st.text(doc["raw_text"])
+            else:
+                st.caption("텍스트를 인식하지 못했습니다 — 위 이미지로 직접 확인하세요.")
 
 
 tab_single, tab_report, tab_price, tab_district, tab_old, tab_priceh, tab_map, tab_geocode, tab_commercial, tab_sangkwon, tab_seoul, tab_autopptx = st.tabs([
@@ -513,6 +579,8 @@ with tab_single:
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             width='stretch',
         )
+
+    _render_ledger_docs_section(st.session_state.get("ledger_docs"))
 
 # ------------------------------------------------------------------
 # 탭 2: 번지 하나 -> 11종 건축물대장 전체 종합 리포트
@@ -625,7 +693,9 @@ with tab_report:
                     "건축물 소유자 정보 오픈API(고유번호 15021136)는 현재 data.go.kr에서 "
                     "서비스가 종료된 상태입니다. 소유자 개인정보 보안 사유로 더 이상 "
                     "공개 API로 제공되지 않는 것으로 보이며, 필요 시 정부24 등기부등본/"
-                    "건축물대장 열람 등 별도 인증 경로를 이용해야 합니다."
+                    "건축물대장 열람 등 별도 인증 경로를 이용해야 합니다. "
+                    "사이드바에 열람본 이미지를 업로드했다면 이 탭 맨 아래에서 위반건축물 여부와 "
+                    "함께 확인할 수 있습니다."
                 )
             elif "오류" in ldf.columns:
                 st.markdown(f"#### ⚠️ {lt} (조회 실패)")
@@ -641,6 +711,8 @@ with tab_report:
             else:
                 st.markdown(f"#### ✅ {lt} ({len(ldf)}건)")
                 st.dataframe(ldf, width='stretch')
+
+        _render_ledger_docs_section(st.session_state.get("ledger_docs"))
 
 # ------------------------------------------------------------------
 # 탭 3: 실거래가 (전체 부동산 유형)
@@ -1574,6 +1646,11 @@ with tab_autopptx:
         "건축물대장 · 실거래가 · 공시가격 · 동단위 시장통계 · 상업용부동산 공실률 · 주변 상가업소 · "
         "(서울 소재 시) 서울 상권분석까지, 실제로 조회한 데이터로 슬라이드를 채웁니다."
     )
+    if st.session_state.get("ledger_docs"):
+        st.caption(
+            f"📎 사이드바에 업로드한 건축물대장 열람본 {len(st.session_state['ledger_docs'])}장이 "
+            "리포트 마지막에 첨부 슬라이드로 포함되고, 위반건축물 표기가 감지되면 건축물 개요에도 반영됩니다."
+        )
     st.caption(
         "※ 상권 성격 · SNS 트렌드 · 개발호재 · SWOT 같은 정성적 항목은 공공데이터로 자동 수집되지 않습니다. "
         "아래에 직접 입력하면 해당 내용 그대로 슬라이드에 반영되고, 비워두면 그 슬라이드는 생략됩니다."
@@ -1621,6 +1698,7 @@ with tab_autopptx:
                             "strengths": swot_strengths, "weaknesses": swot_weaknesses,
                             "opportunities": swot_opportunities, "threats": swot_threats,
                         },
+                        ledger_docs=st.session_state.get("ledger_docs"),
                         progress_callback=_on_report_progress,
                     )
                 progress_box.empty()
