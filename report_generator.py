@@ -1619,7 +1619,7 @@ def _ledger_core_row(report):
     return None
 
 
-def _ledger_cover_slide(prs, address_label, core_row, report_date, has_violation=False):
+def _ledger_cover_slide(prs, address_label, core_row, report_date, has_violation=False, violation_detail=None):
     slide = _new_slide(prs, dark=True)
     for cx, cy, cw, ch, color, grad in [
         (8.6, 3.0, 7.5, 7.5, NAVY_LIGHT, False),
@@ -1640,6 +1640,8 @@ def _ledger_cover_slide(prs, address_label, core_row, report_date, has_violation
     _textbox(slide, 0.9, 4.05, 9, 0.5, "표제부 · 층별개요 · 지역지구구역 등 공부 원본 데이터 기준", size=16, color=ICE)
     if has_violation:
         _textbox(slide, 0.9, 4.55, 9, 0.4, "🚩 업로드한 열람본에서 위반건축물 표기 감지됨", size=13, bold=True, color=TERRACOTTA)
+        if violation_detail:
+            _textbox(slide, 0.9, 4.95, 9.2, 0.5, f"내용(OCR): {violation_detail}", size=11, color=ICE, line_spacing=1.3)
 
     stats = []
     if core_row is not None:
@@ -1761,7 +1763,8 @@ def _ledger_multirow_slide(prs, address_label, title, df, cols):
     _page_footer(slide, address_label, title)
 
 
-def _ledger_owner_history_slide(prs, address_label, owners, changes, firms=None, builder=None):
+def _ledger_owner_history_slide(prs, address_label, owners, changes, firms=None, builder=None,
+                                 violation_detail=None):
     """업로드한 열람본 이미지에서 OCR로 뽑은 소유자현황·변동사항·관계업체를, 원본 사진
     첨부 대신 이 리포트의 다른 슬라이드와 같은 표/텍스트 형식으로 정리해서 보여준다.
     표 셀 인식이 무너진 OCR 결과라 이름 등이 오탈자로 나올 수 있어(예: '윤명분'->'륜령분')
@@ -1799,15 +1802,38 @@ def _ledger_owner_history_slide(prs, address_label, owners, changes, firms=None,
                  "\n".join(lines), size=11, line_spacing=1.4)
 
     right_x, right_w = 6.5, 6.2
-    _textbox(slide, right_x, 1.6, right_w, 0.35, "변동사항", size=13, bold=True, color=NAVY)
+    right_y = 1.6
+    if violation_detail:
+        _textbox(slide, right_x, right_y, right_w, 0.3, "🚩 위반건축물 내용", size=13, bold=True, color=TERRACOTTA)
+        callout = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, _sx(right_x), _sy(right_y + 0.35),
+                                          _sx(right_w), _sy(0.9))
+        callout.adjustments[0] = 0.08
+        callout.fill.solid()
+        callout.fill.fore_color.rgb = RGBColor(0xFB, 0xEA, 0xE3)
+        callout.line.color.rgb = TERRACOTTA
+        callout.line.width = Pt(1)
+        callout.shadow.inherit = False
+        tf = callout.text_frame
+        tf.word_wrap = True
+        tf.margin_left = tf.margin_right = Inches(0.15)
+        tf.margin_top = tf.margin_bottom = Inches(0.08)
+        p = tf.paragraphs[0]
+        run = p.add_run()
+        run.text = violation_detail
+        run.font.size = Pt(10.5)
+        run.font.name = FONT_NAME
+        run.font.color.rgb = TEXT_DARK
+        right_y += 0.35 + 0.9 + 0.3
+
+    _textbox(slide, right_x, right_y, right_w, 0.35, "변동사항", size=13, bold=True, color=NAVY)
     if changes:
-        card_h = min(5.0, 0.5 + 0.55 * len(changes))
-        _card(slide, right_x, 2.0, right_w, card_h)
-        _textbox(slide, right_x + 0.25, 2.15, right_w - 0.5, card_h - 0.3,
+        card_h = min(7.0 - right_y - 0.4, 0.5 + 0.55 * len(changes))
+        _card(slide, right_x, right_y + 0.4, right_w, card_h)
+        _textbox(slide, right_x + 0.25, right_y + 0.55, right_w - 0.5, card_h - 0.3,
                  "\n".join(f"· {c}" for c in changes), size=10, line_spacing=1.4)
     else:
-        _card(slide, right_x, 2.0, right_w, 1.0)
-        _textbox(slide, right_x + 0.25, 2.2, right_w - 0.5, 0.6,
+        _card(slide, right_x, right_y + 0.4, right_w, 1.0)
+        _textbox(slide, right_x + 0.25, right_y + 0.6, right_w - 0.5, 0.6,
                  "OCR로 변동사항을 특정하지 못했습니다. 원본 이미지를 확인하세요.", size=11, color=MUTED)
 
     _page_footer(slide, address_label, "소유자현황 · 변동사항")
@@ -1846,9 +1872,12 @@ def generate_ledger_pptx(report: dict, address_label: str, ledger_docs=None) -> 
 
     core_row = _ledger_core_row(report)
     report_date = datetime.date.today().strftime("%Y년 %m월 %d일 기준")
-    has_violation = any(doc.get("is_violation") for doc in (ledger_docs or []))
+    content = extract_ledger_content(ledger_docs) if ledger_docs else None
+    has_violation = content["is_violation"] if content else False
+    violation_detail = content.get("violation_detail") if content else None
 
-    _ledger_cover_slide(prs, address_label, core_row, report_date, has_violation=has_violation)
+    _ledger_cover_slide(prs, address_label, core_row, report_date,
+                        has_violation=has_violation, violation_detail=violation_detail)
     _ledger_overview_slide(prs, address_label, core_row, report, has_violation=has_violation)
     _ledger_floor_slide(prs, address_label, report)
 
@@ -1858,11 +1887,11 @@ def generate_ledger_pptx(report: dict, address_label: str, ledger_docs=None) -> 
             cols = [c for c in _MULTIROW_KEEP_COLS.get(ledger_type, []) if c in df.columns] or list(df.columns)
             _ledger_multirow_slide(prs, address_label, ledger_type, df, cols)
 
-    if ledger_docs:
-        content = extract_ledger_content(ledger_docs)
+    if content:
         _ledger_owner_history_slide(
             prs, address_label, content["owners"], content["changes"],
             firms=content.get("firms"), builder=content.get("builder"),
+            violation_detail=violation_detail,
         )
 
     _ledger_appendix_slide(prs, address_label)

@@ -168,21 +168,54 @@ _CHANGE_LINE_RE = re.compile(r"\d{4}\s*[.\-]\s*\d{1,2}\s*[.\-]\s*\d{1,2}")
 
 
 def extract_change_history(text: str) -> list[str]:
-    """'변동사항' 절 이후에서 날짜가 포함된 줄만, 정리하지 않고 원문에 가깝게 뽑는다.
+    """'변동사항' 절 이후에서 날짜로 시작하는 항목들을, 정리하지 않고 원문에 가깝게 뽑는다.
 
     을(乙)페이지 변동사항은 2단으로 나뉜 표라 OCR이 두 컬럼을 한 줄에 섞어버리는 경우가
-    많다 — 깔끔한 표로 재구성하려 하지 않고, 날짜가 포함된 원문 줄을 그대로 보여준다.
+    많다 — 깔끔한 표로 재구성하려 하지 않고, 원문 줄을 그대로 보여준다. 한 항목이 여러
+    줄로 줄바꿈된 경우(날짜 없는 줄이 이어짐)는 다음 날짜가 나오거나 "※" 각주가
+    나올 때까지 한 항목으로 이어붙인다 — 안 그러면 위반건축물 사유처럼 둘째 줄에
+    이어지는 핵심 내용이 통째로 잘려나간다.
     """
     idx = text.find("변동사항")
     if idx == -1:
         return []
     section = text[idx:]
-    lines = []
-    for line in section.splitlines():
-        line = re.sub(r"\s+", " ", line).strip()
+    raw_lines = [re.sub(r"\s+", " ", line).strip() for line in section.splitlines()]
+    raw_lines = [line for line in raw_lines if line]
+
+    entries = []
+    current = None
+    for line in raw_lines:
+        if line.startswith("※"):
+            break
         if _CHANGE_LINE_RE.search(line) and len(line) > 8:
-            lines.append(line)
-    return lines[:12]
+            if current:
+                entries.append(current)
+            current = line
+        elif current is not None and len(line) > 5:
+            current = f"{current} {line}"
+    if current:
+        entries.append(current)
+    return entries[:12]
+
+
+# "표기[구조,면적,용도,위반내용]"처럼 위반건축물 표기 사유를 대괄호 안에 적는 관례가 있어,
+# "위반" 글자 자체가 OCR로 깨졌어도 이 대괄호 묶음은 남아있는 경우가 있다. 다만 변동사항
+# 텍스트에 다른 이유로 생긴 "[" "]"가 우연히 섞여 있으면 첫 "["~첫 "]" 사이를 통째로
+# 잡아버려 엉뚱하게 길어지므로, 안에 또 다른 "["가 없는(중첩되지 않은) 가장 안쪽 묶음만,
+# 그것도 지나치게 길면(다른 무관한 내용까지 딸려온 것일 가능성이 높음) 걸러낸다 — 재현
+# 테스트에서 진짜 위반 사유 묶음은 60자 이내였고, 우연히 걸린 다른 括호는 그보다 길었다.
+_VIOLATION_BRACKET_RE = re.compile(r"\[[^\[\]]{3,60}\]")
+
+
+def extract_violation_detail(changes: list[str]) -> str | None:
+    """변동사항 중 위반건축물 표기 사유로 보이는 대괄호 내용 하나를 골라낸다.
+    마땅한 게 없으면 None — 있지도 않은 내용을 지어내 보여주지 않는다."""
+    for entry in changes:
+        m = _VIOLATION_BRACKET_RE.search(entry)
+        if m:
+            return m.group(0)
+    return None
 
 
 # 갑(甲)페이지의 소유자현황(성명/주소/소유권지분/변동일) 칸은 건축물현황 표 오른쪽
@@ -258,6 +291,7 @@ def extract_ledger_content(docs: list[dict]) -> dict:
     """
     owners, changes, firms = [], [], []
     builder = None
+    has_violation = any(doc.get("is_violation") for doc in docs)
     for doc in docs:
         text = doc.get("raw_text") or ""
         if not text or not doc.get("ocr_available"):
@@ -298,4 +332,8 @@ def extract_ledger_content(docs: list[dict]) -> dict:
             uniq_owners.append(owner)
 
     uniq_firms = list(dict.fromkeys(firms))
-    return {"owners": uniq_owners, "changes": changes, "firms": uniq_firms, "builder": builder}
+    violation_detail = extract_violation_detail(changes) if has_violation else None
+    return {
+        "owners": uniq_owners, "changes": changes, "firms": uniq_firms, "builder": builder,
+        "is_violation": has_violation, "violation_detail": violation_detail,
+    }
