@@ -823,43 +823,55 @@ with tab_price:
                     if tp_dong != "(전체)" and "법정동" in tp_df.columns:
                         tp_df = tp_df[tp_df["법정동"] == tp_dong].reset_index(drop=True)
 
+                # 아래 세 항목(시가표준액/역매칭/좌표)은 모두 선택 부가기능이다 — 정부 API가
+                # 일시적으로 오류(게이트웨이 502 등)를 내더라도, 이미 성공적으로 받아온 기본
+                # 실거래가 결과(tp_df)까지 통째로 날리지 않도록 각각 독립적으로 감싼다.
                 if tp_with_price and not tp_df.empty:
-                    ledger_api = BuildingLedger(service_key)
-                    price_progress = st.progress(0.0, text="시가표준액 조회 준비 중...")
+                    try:
+                        ledger_api = BuildingLedger(service_key)
+                        price_progress = st.progress(0.0, text="시가표준액 조회 준비 중...")
 
-                    def _on_price_progress(i, total):
-                        price_progress.progress(i / total, text=f"시가표준액 조회 중... ({i}/{total} 지번)")
+                        def _on_price_progress(i, total):
+                            price_progress.progress(i / total, text=f"시가표준액 조회 중... ({i}/{total} 지번)")
 
-                    tp_df = add_standard_price_column(
-                        tp_df, ledger_api, tp_sigungu, progress_callback=_on_price_progress,
-                    )
-                    price_progress.empty()
+                        tp_df = add_standard_price_column(
+                            tp_df, ledger_api, tp_sigungu, progress_callback=_on_price_progress,
+                        )
+                        price_progress.empty()
+                    except Exception as e:
+                        st.warning(f"시가표준액 조회에 실패해 이 항목만 건너뜁니다: {e}")
 
                 if tp_with_reverse_match and tp_dong != "(전체)" and not tp_df.empty:
                     has_masked = tp_df["지번"].astype(str).str.contains(r"\*").any() if "지번" in tp_df.columns else False
                     if has_masked:
-                        ledger_api = BuildingLedger(service_key)
-                        bdong_map = get_bdong_code_map(tp_sigungu)
-                        bdong_code = bdong_map.get(tp_dong)
-                        if bdong_code:
-                            with st.spinner(f"'{tp_dong}' 표제부 전체 수집 중... (역매칭용, 캐시되어 있으면 즉시 완료)"):
-                                dong_title_df = _load_district_titles(service_key, tp_sigungu, bdong_code)
-                            tp_df = reverse_match_transactions(tp_df, dong_title_df)
-                        else:
-                            st.warning(f"'{tp_dong}'의 법정동코드를 찾지 못해 역매칭을 건너뜁니다.")
+                        try:
+                            ledger_api = BuildingLedger(service_key)
+                            bdong_map = get_bdong_code_map(tp_sigungu)
+                            bdong_code = bdong_map.get(tp_dong)
+                            if bdong_code:
+                                with st.spinner(f"'{tp_dong}' 표제부 전체 수집 중... (역매칭용, 캐시되어 있으면 즉시 완료)"):
+                                    dong_title_df = _load_district_titles(service_key, tp_sigungu, bdong_code)
+                                tp_df = reverse_match_transactions(tp_df, dong_title_df)
+                            else:
+                                st.warning(f"'{tp_dong}'의 법정동코드를 찾지 못해 역매칭을 건너뜁니다.")
+                        except Exception as e:
+                            st.warning(f"역매칭에 실패해 이 항목만 건너뜁니다: {e}")
                     else:
                         st.caption("마스킹된 지번이 없어 역매칭을 건너뜁니다.")
 
                 if tp_with_coords and kakao_key and not tp_df.empty and "주소" in tp_df.columns:
-                    coord_progress = st.progress(0.0, text="좌표 조회 준비 중...")
+                    try:
+                        coord_progress = st.progress(0.0, text="좌표 조회 준비 중...")
 
-                    def _on_coord_progress(i, total):
-                        coord_progress.progress(i / total, text=f"주소 좌표 조회 중... ({i}/{total} 고유 주소)")
+                        def _on_coord_progress(i, total):
+                            coord_progress.progress(i / total, text=f"주소 좌표 조회 중... ({i}/{total} 고유 주소)")
 
-                    tp_df = add_coordinates_column(
-                        tp_df, kakao_key, progress_callback=_on_coord_progress,
-                    )
-                    coord_progress.empty()
+                        tp_df = add_coordinates_column(
+                            tp_df, kakao_key, progress_callback=_on_coord_progress,
+                        )
+                        coord_progress.empty()
+                    except Exception as e:
+                        st.warning(f"좌표 조회에 실패해 이 항목만 건너뜁니다: {e}")
 
                 st.session_state.tp_df = tp_df
             except Exception as e:

@@ -556,10 +556,12 @@ def analyze_transaction_stats(df: pd.DataFrame) -> dict:
 _DATA_GO_KR_TRANSIENT_STATUS = {500, 502, 503, 504}
 
 
-def _fetch_data_go_kr_envelope(url: str, params: dict, retries: int = 3, timeout: float = 15) -> dict:
+def _fetch_data_go_kr_envelope(url: str, params: dict, retries: int = 4, timeout: float = 15) -> dict:
     """건축HUB 등 data.go.kr XML API를 호출해 {"header":..., "body":...} 형태의 envelope로 정규화.
 
-    - HTTP 500/502/503/504(게이트웨이 과부하 등 일시적 오류)는 지수 백오프로 재시도한다.
+    - HTTP 500/502/503/504(게이트웨이 과부하 등 일시적 오류)는 지수 백오프(1/2/3초, 최대
+      4회 시도 — 총 최대 6초 대기)로 재시도한다. 실제로 겪은 HTTP_ERROR(502)는 몇 초 안에
+      풀리는 경우가 많아, 사용자가 직접 재시도 버튼을 누르지 않아도 되게 하는 게 목적이다.
     - 응답이 XML이든(정상 케이스) JSON이든(결과 0건이거나 드물게 XML 대신 JSON으로 응답하는
       경우가 관찰됨 — 건축HUB·국토부 실거래가 API 공통), <response> 래퍼가 있든 없든 전부
       같은 header/body 구조로 맞춰 반환한다.
@@ -572,7 +574,7 @@ def _fetch_data_go_kr_envelope(url: str, params: dict, retries: int = 3, timeout
         res = requests.get(url, params=params, verify=False, timeout=timeout)
         if res.status_code not in _DATA_GO_KR_TRANSIENT_STATUS or attempt == retries - 1:
             break
-        time.sleep(0.6 * (attempt + 1))
+        time.sleep(1.0 * (attempt + 1))
 
     try:
         parsed = xmltodict.parse(res.text)
