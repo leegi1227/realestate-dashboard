@@ -1637,8 +1637,10 @@ with tab_flpop:
             try:
                 with st.spinner("서울 생활인구 데이터 조회 중..."):
                     flpop_date_str = flpop_date.strftime("%Y%m%d")
-                    flpop_df = get_seoul_living_population(seoul_key, flpop_date_str, flpop_adstrd_code)
-                st.session_state.flpop_result = (f"{flpop_gu} {flpop_dong}", flpop_adstrd_code, flpop_date_str, flpop_df)
+                    flpop_result_dict = get_seoul_living_population(seoul_key, flpop_date_str, flpop_adstrd_code)
+                st.session_state.flpop_result = (
+                    f"{flpop_gu} {flpop_dong}", flpop_adstrd_code, flpop_date_str, flpop_result_dict,
+                )
             except Exception as e:
                 st.error(f"조회 실패: {e}")
                 st.session_state.flpop_result = None
@@ -1647,9 +1649,28 @@ with tab_flpop:
         if flpop_result is None:
             st.info("구·행정동·기준일자를 고르고 **유동인구 조회**를 눌러주세요.")
         else:
-            used_label, used_code, used_date, flpop_df = flpop_result
+            used_label, used_code, used_date, flpop_result_dict = flpop_result
+            flpop_df = flpop_result_dict["df"]
             if flpop_df is None or flpop_df.empty:
-                st.info(f"'{used_label}'({used_code})의 {used_date} 데이터가 없습니다. 행정동이나 날짜를 바꿔보세요.")
+                if flpop_result_dict["citywide_rows"] == 0:
+                    st.info(
+                        f"'{used_date}' 기준 서울 전체 응답 자체가 0건입니다 — 이 날짜가 데이터 제공 "
+                        "범위 밖이거나(최근 며칠~2개월 정도로 제한적일 수 있음), 서비스명이 실제와 "
+                        "다를 가능성이 있습니다. 오늘로부터 5일 전처럼 더 최근 날짜로 먼저 시도해보세요."
+                    )
+                elif not flpop_result_dict["code_col"]:
+                    st.warning(
+                        f"서울 전체 {flpop_result_dict['citywide_rows']:,}건은 받았는데, 행정동코드로 "
+                        "보이는 컬럼을 찾지 못했습니다. 실제 컬럼명 목록:"
+                    )
+                    st.code(", ".join(flpop_result_dict["citywide_cols"]))
+                else:
+                    st.warning(
+                        f"서울 전체 {flpop_result_dict['citywide_rows']:,}건 중 행정동코드 '{used_code}'와 "
+                        f"일치하는 행이 없습니다 (감지된 컬럼: `{flpop_result_dict['code_col']}`). "
+                        "실제 데이터에 담긴 코드 예시(앞 10개):"
+                    )
+                    st.code(", ".join(flpop_result_dict["sample_codes"]))
             else:
                 st.success(f"'{used_label}' (행정동코드 {used_code}) · 기준일자 {used_date} · {len(flpop_df)}건 조회됨")
                 flpop_analysis = analyze_seoul_living_population(flpop_df)

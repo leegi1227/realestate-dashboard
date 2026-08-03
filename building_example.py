@@ -1569,20 +1569,37 @@ def _seoul_fetch_all(seoul_key: str, service: str, extra_path: str = None, max_r
 SEOUL_LIVING_POP_DONG_SERVICE = "SPOP_LOCAL_RESD_DONG"
 
 
-def get_seoul_living_population(seoul_key: str, date_str: str, adstrd_code: str = None) -> pd.DataFrame:
+def get_seoul_living_population(seoul_key: str, date_str: str, adstrd_code: str = None) -> dict:
     """행정동 단위 서울생활인구(내국인) 특정 날짜(YYYYMMDD) 데이터를 가져온다.
 
     서버가 행정동 단위 필터 파라미터를 지원하는지 불확실해서, 안전하게 그 날짜의
     서울 전체 데이터를 받아 adstrd_code가 있으면 로컬에서 거른다 — 우리마을가게
     상권분석(도시 전체를 받아 상권코드로 거르는 방식)과 같은 전략이다.
+
+    결과가 빈 이유(서비스명이 잘못됐는지/그 날짜 자체가 지원 범위 밖인지/행정동
+    코드 컬럼을 못 찾았는지/컬럼은 찾았는데 그 코드가 없는지)를 호출부가 구분해서
+    보여줄 수 있도록, 필터링 전 시 전체 결과에 대한 진단 정보도 함께 반환한다.
     """
-    df = _seoul_fetch_all(seoul_key, SEOUL_LIVING_POP_DONG_SERVICE, extra_path=date_str)
-    if df.empty or not adstrd_code:
-        return df
-    code_col = next((c for c in df.columns if re.search(r"ADSTRD|행정동.?코드|DONG.?CD", c, re.I)), None)
+    citywide = _seoul_fetch_all(seoul_key, SEOUL_LIVING_POP_DONG_SERVICE, extra_path=date_str)
+    result = {
+        "df": citywide, "citywide_rows": len(citywide), "citywide_cols": list(citywide.columns),
+        "code_col": None, "sample_codes": [],
+    }
+    if citywide.empty or not adstrd_code:
+        return result
+
+    code_col = next((c for c in citywide.columns if re.search(r"ADSTRD|행정동.?코드|DONG.?CD", c, re.I)), None)
+    result["code_col"] = code_col
     if not code_col:
-        return df
-    return df[df[code_col].astype(str).str.strip() == str(adstrd_code).strip()].reset_index(drop=True)
+        # adstrd_code로 걸러달라는 요청인데 거를 컬럼을 못 찾았으므로, 시 전체를 그대로
+        # 반환하면 안 된다(어느 행정동인지 구분 안 된 전체 데이터를 마치 필터링된
+        # 결과처럼 보여주게 됨) — 빈 결과로 만들어 호출부가 진단 분기를 타게 한다.
+        result["df"] = citywide.iloc[0:0]
+        return result
+
+    result["sample_codes"] = sorted(citywide[code_col].astype(str).str.strip().unique())[:10]
+    result["df"] = citywide[citywide[code_col].astype(str).str.strip() == str(adstrd_code).strip()].reset_index(drop=True)
+    return result
 
 
 def analyze_seoul_living_population(df: pd.DataFrame) -> dict:
