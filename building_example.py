@@ -1579,11 +1579,18 @@ def get_seoul_living_population(seoul_key: str, date_str: str, adstrd_code: str 
     결과가 빈 이유(서비스명이 잘못됐는지/그 날짜 자체가 지원 범위 밖인지/행정동
     코드 컬럼을 못 찾았는지/컬럼은 찾았는데 그 코드가 없는지)를 호출부가 구분해서
     보여줄 수 있도록, 필터링 전 시 전체 결과에 대한 진단 정보도 함께 반환한다.
+
+    adstrd_code 정확 일치가 실패하면, 앞 5자리(법정동 시군구코드, 예: 이태원동이
+    속한 "11170")가 같은 행의 코드를 "district_candidates"에 모아 함께 돌려준다 —
+    행정동코드 마지막 3자리(읍면동 일련번호)는 이 API가 실제로 어떤 표를 쓰는지
+    아직 100% 확인되지 않아 SGIS 참조표와 일부 어긋날 수 있는데, 그래도 앞 5자리
+    (시군구)는 국토부 법정동코드와 일치함이 실제 응답으로 확인됐으니, 같은 구의
+    실제 후보 코드를 눈으로 보고 골라낼 수 있게 하기 위함이다.
     """
     citywide = _seoul_fetch_all(seoul_key, SEOUL_LIVING_POP_DONG_SERVICE, extra_path=date_str)
     result = {
         "df": citywide, "citywide_rows": len(citywide), "citywide_cols": list(citywide.columns),
-        "code_col": None, "sample_codes": [],
+        "code_col": None, "sample_codes": [], "district_candidates": None,
     }
     if citywide.empty or not adstrd_code:
         return result
@@ -1597,8 +1604,25 @@ def get_seoul_living_population(seoul_key: str, date_str: str, adstrd_code: str 
         result["df"] = citywide.iloc[0:0]
         return result
 
-    result["sample_codes"] = sorted(citywide[code_col].astype(str).str.strip().unique())[:10]
-    result["df"] = citywide[citywide[code_col].astype(str).str.strip() == str(adstrd_code).strip()].reset_index(drop=True)
+    codes = citywide[code_col].astype(str).str.strip()
+    result["sample_codes"] = sorted(codes.unique())[:10]
+    result["df"] = citywide[codes == str(adstrd_code).strip()].reset_index(drop=True)
+
+    if result["df"].empty:
+        district_prefix = str(adstrd_code).strip()[:5]
+        same_district = citywide[codes.str.startswith(district_prefix)]
+        if not same_district.empty:
+            total_col = next((c for c in citywide.columns if re.search(r"TOT.*LVPOP|LVPOP.*TOT", c, re.I)), None)
+            if total_col:
+                summary = same_district.copy()
+                summary[total_col] = pd.to_numeric(summary[total_col], errors="coerce")
+                result["district_candidates"] = (
+                    summary.groupby(code_col)[total_col].agg(["mean", "max"]).round(0)
+                    .rename(columns={"mean": "평균생활인구", "max": "최대생활인구"})
+                    .sort_values("평균생활인구", ascending=False)
+                )
+            else:
+                result["district_candidates"] = pd.DataFrame({"코드": sorted(same_district[code_col].astype(str).unique())})
     return result
 
 

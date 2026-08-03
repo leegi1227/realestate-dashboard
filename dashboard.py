@@ -1667,10 +1667,19 @@ with tab_flpop:
                 else:
                     st.warning(
                         f"서울 전체 {flpop_result_dict['citywide_rows']:,}건 중 행정동코드 '{used_code}'와 "
-                        f"일치하는 행이 없습니다 (감지된 컬럼: `{flpop_result_dict['code_col']}`). "
-                        "실제 데이터에 담긴 코드 예시(앞 10개):"
+                        f"일치하는 행이 없습니다 (감지된 컬럼: `{flpop_result_dict['code_col']}`)."
                     )
-                    st.code(", ".join(flpop_result_dict["sample_codes"]))
+                    candidates = flpop_result_dict.get("district_candidates")
+                    if candidates is not None and not candidates.empty:
+                        st.info(
+                            f"대신 같은 구(코드 앞 5자리 '{used_code[:5]}')에 속한 실제 코드 "
+                            f"{len(candidates)}개를 찾았습니다 — 생활인구 규모나 시간대 패턴을 보고 "
+                            f"'{used_label.split()[-1]}'에 해당하는 코드를 짐작해볼 수 있습니다:"
+                        )
+                        st.dataframe(candidates, width='stretch')
+                    else:
+                        st.caption("실제 데이터에 담긴 코드 예시(앞 10개):")
+                        st.code(", ".join(flpop_result_dict["sample_codes"]))
                     st.caption("전체 컬럼 목록 (행정동 이름 컬럼이 따로 있는지 확인용):")
                     st.code(", ".join(flpop_result_dict["citywide_cols"]))
             else:
