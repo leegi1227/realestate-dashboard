@@ -621,8 +621,20 @@ def get_building_ledger(
         params["pageNo"] = page
         res = requests.get(url, params=params, verify=False, timeout=15)
         try:
-            envelope = xmltodict.parse(res.text)["response"]
+            parsed = xmltodict.parse(res.text)
         except Exception:
+            parsed = None
+        envelope = parsed.get("response") if isinstance(parsed, dict) else None
+
+        # 서비스키 미등록/한도초과 등 게이트웨이 레벨 오류는 <response> 대신
+        # <OpenAPI_ServiceResponse> 포맷으로 온다 — 이 경우를 놓치면 아래
+        # "header가 없다"는 불명확한 메시지로 뭉개져 실제 원인을 알 수 없다.
+        if envelope is None and isinstance(parsed, dict) and "OpenAPI_ServiceResponse" in parsed:
+            hdr = (parsed["OpenAPI_ServiceResponse"] or {}).get("cmmMsgHeader") or {}
+            if hdr.get("errMsg"):
+                raise Exception(f"{hdr['errMsg']} (코드: {hdr.get('returnReasonCode')})")
+
+        if envelope is None:
             # data.go.kr 계열 API는 (결과 0건이든 정상 데이터든) XML 대신
             # JSON으로 응답하는 경우가 있다. 구조는 XML을 파싱했을 때와
             # 동일(header/body)하므로 그대로 같은 경로로 처리한다.
@@ -636,13 +648,18 @@ def get_building_ledger(
                     f"API가 XML도 JSON도 아닌 응답을 반환했습니다 (HTTP {res.status_code}). "
                     f"응답 본문 일부: {res.text[:300]!r}"
                 )
-        if not envelope:
-            raise Exception(f"API 요청이 실패했습니다: {envelope}")
-        if envelope["header"]["resultCode"] != "00":
-            raise Exception(envelope["header"]["resultMsg"])
 
-        body = envelope["body"]
-        total_count = int(body["totalCount"])
+        header = envelope.get("header") if isinstance(envelope, dict) else None
+        if header is None:
+            raise Exception(
+                f"API 응답에 header가 없습니다 (HTTP {res.status_code}). "
+                f"응답 본문 일부: {res.text[:300]!r}"
+            )
+        if header.get("resultCode") != "00":
+            raise Exception(header.get("resultMsg") or "알 수 없는 오류")
+
+        body = envelope.get("body") or {}
+        total_count = int(body.get("totalCount") or 0)
         items = body.get("items")
         if not items:
             break
