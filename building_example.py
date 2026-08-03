@@ -79,6 +79,68 @@ def _https_patched_transaction_price_init(self, *args, **kwargs):
 BuildingLedger.__init__ = _https_patched_building_ledger_init
 TransactionPrice.__init__ = _https_patched_transaction_price_init
 
+
+def _patched_response_to_item_data(self, res, property_type, trade_type, sigungu_code, year_month):
+    """PublicDataReader.TransactionPrice._response_to_item_data 몽키패치.
+
+    원본은 res_json = xmltodict.parse(res.text) 한 줄만 시도하고, 그 뒤
+    res_json['response']['header']를 무방비하게 읽는다 — data.go.kr이 (건축HUB
+    쪽에서 이미 겪은 것과 같은 이유로) XML 대신 JSON으로 응답하거나 예상과
+    다른 형태로 응답하면 KeyError('header')를 그대로 던진다. 더 나쁜 건 기간
+    조회(get_data의 date_list 반복문)에 이 호출을 감싼 try/except가 없어서,
+    수개월치 조회 중 단 한 달만 이런 응답을 받아도 전체 조회가 중단된다.
+    XML 파싱이 실패하거나 header가 없으면 JSON으로도 시도하고, 그래도 못
+    읽으면 원본과 비슷하게 명확한 에러 메시지를 낸다(조용히 건너뛰지 않음 —
+    실제 API 오류(키 미등록 등)를 숨기면 더 위험하다)."""
+    if res.status_code != 200:
+        print(f"Request of {property_type}, {trade_type}, {sigungu_code} for {year_month} "
+              f"failed with status code: {res.status_code}")
+        return None
+
+    try:
+        parsed = xmltodict.parse(res.text)
+    except Exception:
+        parsed = None
+    envelope = parsed.get("response") if isinstance(parsed, dict) else None
+
+    # 서비스키 미등록 등 실제 API 오류는 <OpenAPI_ServiceResponse> 포맷으로 온다
+    # (원본 PublicDataReader가 처리하던 케이스) — 이 정보는 놓치지 않고 그대로 보존한다.
+    if envelope is None and isinstance(parsed, dict) and "OpenAPI_ServiceResponse" in parsed:
+        hdr = (parsed["OpenAPI_ServiceResponse"] or {}).get("cmmMsgHeader") or {}
+        if hdr.get("errMsg"):
+            raise Exception(
+                f"Request of {property_type}, {trade_type}, {sigungu_code} for {year_month} "
+                f"failed with error: {hdr.get('errMsg')}, error code: '{hdr.get('returnReasonCode')}'"
+            )
+
+    if envelope is None:
+        try:
+            json_body = json.loads(res.text)
+            envelope = json_body.get("response") or json_body
+        except Exception:
+            envelope = None
+        if envelope is None:
+            raise Exception(
+                f"Request of {property_type}, {trade_type}, {sigungu_code} for {year_month} "
+                f"응답을 해석하지 못했습니다(XML/JSON 모두 실패). 응답 본문 일부: {res.text[:200]!r}"
+            )
+
+    header = envelope.get("header") if isinstance(envelope, dict) else None
+    if header is None:
+        raise Exception(
+            f"Request of {property_type}, {trade_type}, {sigungu_code} for {year_month} "
+            f"응답에 header가 없습니다. 응답 본문 일부: {res.text[:200]!r}"
+        )
+
+    if header.get("resultCode") not in ("000", "00"):
+        raise Exception(header.get("resultMsg") or f"알 수 없는 오류 ({year_month})")
+
+    body = envelope.get("body") or {}
+    return body.get("items")
+
+
+TransactionPrice._response_to_item_data = _patched_response_to_item_data
+
 # ========================= 설정 (여기만 수정) =========================
 # 서비스키는 소스에 직접 적지 말고 환경변수로 주입한다 (공개 저장소 유출 방지).
 # Windows: set BUILDING_LEDGER_SERVICE_KEY=발급받은_키
