@@ -31,6 +31,7 @@ PublicDataReader(pip 배포판)의 BuildingLedger.get_data()는 페이지 수를
 import concurrent.futures
 import datetime
 import functools
+import json
 import os
 import re
 import time
@@ -558,18 +559,27 @@ def get_building_ledger(
         params["pageNo"] = page
         res = requests.get(url, params=params, verify=False, timeout=15)
         try:
-            res_json = xmltodict.parse(res.text)
+            envelope = xmltodict.parse(res.text)["response"]
         except Exception:
-            raise Exception(
-                f"API가 XML이 아닌 응답을 반환했습니다 (HTTP {res.status_code}). "
-                f"응답 본문 일부: {res.text[:300]!r}"
-            )
-        if not res_json.get("response"):
-            raise Exception(f"API 요청이 실패했습니다: {res_json}")
-        if res_json["response"]["header"]["resultCode"] != "00":
-            raise Exception(res_json["response"]["header"]["resultMsg"])
+            # data.go.kr 계열 API는 (결과 0건이든 정상 데이터든) XML 대신
+            # JSON으로 응답하는 경우가 있다. 구조는 XML을 파싱했을 때와
+            # 동일(header/body)하므로 그대로 같은 경로로 처리한다.
+            try:
+                json_body = json.loads(res.text)
+                envelope = json_body.get("response") or json_body
+            except Exception:
+                envelope = None
+            if envelope is None:
+                raise Exception(
+                    f"API가 XML도 JSON도 아닌 응답을 반환했습니다 (HTTP {res.status_code}). "
+                    f"응답 본문 일부: {res.text[:300]!r}"
+                )
+        if not envelope:
+            raise Exception(f"API 요청이 실패했습니다: {envelope}")
+        if envelope["header"]["resultCode"] != "00":
+            raise Exception(envelope["header"]["resultMsg"])
 
-        body = res_json["response"]["body"]
+        body = envelope["body"]
         total_count = int(body["totalCount"])
         items = body.get("items")
         if not items:
