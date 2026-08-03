@@ -24,7 +24,6 @@ import math
 import os
 
 import pandas as pd
-from PIL import Image
 from pptx import Presentation
 from pptx.util import Inches, Pt, Emu
 from pptx.dml.color import RGBColor
@@ -35,6 +34,7 @@ from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION, XL_TICK_LABEL_POS
 from pptx.oxml.ns import qn
 
 from building_example import (
+    analyze_district_price_stats,
     analyze_seismic_risk,
     analyze_seoul_trade_area_detail,
     build_executive_summary,
@@ -560,9 +560,9 @@ def _transactions_slide(prs, data):
         return
     slide = _new_slide(prs)
     _section_title(slide, "실거래가 동향")
-    _textbox(slide, 0.6, 1.3, 5.6, 0.35, "최근 거래 내역", size=13, bold=True, color=NAVY)
+    _textbox(slide, 0.6, 1.3, 5.6, 0.35, "최근 거래 내역 (반경 200m 이내)", size=13, bold=True, color=NAVY)
     _table(slide, 0.6, 1.7, 5.6, min(2.6, 0.42 * (len(tx["rows"]) + 1)),
-           ["거래일", "층", "전용면적", "거래가격"], tx["rows"], col_ratios=[1.6, 1.1, 1.4, 1.5])
+           ["거래일", "층", "전용면적", "거래가격", "거리"], tx["rows"], col_ratios=[1.4, 0.9, 1.2, 1.3, 0.9])
 
     if tx.get("trend") and len(tx["trend"]) >= 2:
         _textbox(slide, 6.6, 1.3, 6.1, 0.35, "거래가 추이", size=13, bold=True, color=NAVY)
@@ -622,11 +622,25 @@ def _price_history_slide(prs, data):
 
     if ph.get("rows"):
         _textbox(slide, 8.3, 1.3, 4.4, 0.35, "연도별 변동률", size=13, bold=True, color=NAVY)
-        _table(slide, 8.3, 1.7, 4.4, min(2.2, 0.42 * (len(ph["rows"]) + 1)),
+        _table(slide, 8.3, 1.7, 4.4, min(2.0, 0.42 * (len(ph["rows"]) + 1)),
                ["연도", "공시가격", "전년대비"], ph["rows"], col_ratios=[1.3, 1.6, 1.5])
+    district = ph.get("district")
+    if district:
+        _textbox(slide, 8.3, 3.9, 4.4, 0.3, "동단위 주변사례 비교", size=12, bold=True, color=NAVY)
+        cards = [
+            ("평균", f"{district['평균']:.2f}억" if district.get("평균") is not None else "-"),
+            ("중앙값", f"{district['중앙값']:.2f}억" if district.get("중앙값") is not None else "-"),
+        ]
+        if district.get("상위백분율") is not None:
+            cards.append(("대상물건 위치", f"상위 {district['상위백분율']:.0f}%"))
+        cw, gap = (4.4 - 0.15 * (len(cards) - 1)) / len(cards), 0.15
+        for i, (label, val) in enumerate(cards):
+            _stat_card(slide, 8.3 + i * (cw + gap), 4.25, cw, 1.05, val, label)
     if ph.get("note"):
-        _card(slide, 8.3, 4.1, 4.4, 2.2)
-        _textbox(slide, 8.55, 4.1, 3.9, 2.2, ph["note"], size=12, valign=MSO_ANCHOR.MIDDLE, line_spacing=1.3)
+        note_y = 5.5 if district else 4.1
+        note_h = max(0.9, 6.9 - note_y)
+        _card(slide, 8.3, note_y, 4.4, note_h)
+        _textbox(slide, 8.55, note_y, 3.9, note_h, ph["note"], size=10.5, valign=MSO_ANCHOR.MIDDLE, line_spacing=1.25)
     _page_footer(slide, data["address"], "공시가격 시계열")
 
 
@@ -635,7 +649,9 @@ def _commercial_slide(prs, data):
     if not com or (not com.get("vacancy_trend") and not com.get("top_industries")):
         return
     slide = _new_slide(prs)
-    _section_title(slide, "상권 개황 — 공실률 및 주변 업종")
+    area_name = com.get("area_name")
+    title = f"상권 개황 — 공실률 및 주변 업종 ({area_name})" if area_name else "상권 개황 — 공실률 및 주변 업종"
+    _section_title(slide, title)
 
     if com.get("vacancy_trend"):
         _textbox(slide, 0.6, 1.3, 6.0, 0.35, f"공실률 추이 ({com.get('vacancy_label', '')})", size=13, bold=True, color=NAVY)
@@ -647,7 +663,8 @@ def _commercial_slide(prs, data):
                  size=12, color=MUTED, align=PP_ALIGN.CENTER)
 
     if com.get("top_industries"):
-        _textbox(slide, 6.9, 1.3, 5.8, 0.35, "반경 500m 업종 Top 5 (점포 수)", size=13, bold=True, color=NAVY)
+        industry_label = "업종 Top 5 (점포 수, 서울 열린데이터광장)" if area_name else "반경 500m 업종 Top 5 (점포 수)"
+        _textbox(slide, 6.9, 1.3, 5.8, 0.35, industry_label, size=13, bold=True, color=NAVY)
         chart = _bar_chart(slide, 6.9, 1.7, 5.8, 4.6,
                             [t["label"] for t in com["top_industries"]], [t["value"] for t in com["top_industries"]],
                             TERRACOTTA, horizontal=True)
@@ -661,10 +678,18 @@ def _nearby_stores_detail_slide(prs, data):
     if not stores:
         return
     slide = _new_slide(prs)
-    _section_title(slide, "반경 상가업소 상세 목록")
-    _table(slide, 0.6, 1.3, 12.1, min(5.6, 0.42 * (len(stores) + 1)),
-           ["상호명", "업종", "주소", "거리"], stores, col_ratios=[2.2, 1.6, 3.4, 1])
-    _page_footer(slide, data["address"], "반경 상가업소 상세")
+    cols = com.get("store_list_cols") or ["상호명", "업종", "주소", "거리"]
+    is_seoul_detail = cols[0] == "업종"
+    area_name = com.get("area_name")
+    if is_seoul_detail:
+        title = f"업종별 상세 현황 — {area_name} (서울 열린데이터광장)" if area_name else "업종별 상세 현황"
+        ratios = [2.6, 1.6, 1.3, 1.3, 1.3]
+    else:
+        title = "반경 상가업소 상세 목록"
+        ratios = [2.2, 1.6, 3.4, 1]
+    _section_title(slide, title)
+    _table(slide, 0.6, 1.3, 12.1, min(5.6, 0.42 * (len(stores) + 1)), cols, stores, col_ratios=ratios)
+    _page_footer(slide, data["address"], "업종별 상세 현황" if is_seoul_detail else "반경 상가업소 상세")
 
 
 def _trade_area_map_slide(prs, data):
@@ -697,8 +722,8 @@ def _seoul_detail_slide(prs, data):
         _stat_card(slide, x, 1.3, card_w, 1.2, s["value"], s["label"])
 
     if sd.get("top_industries"):
-        _textbox(slide, 0.6, 2.85, 5.6, 0.35, "업종별 매출 Top 5", size=13, bold=True, color=NAVY)
-        _table(slide, 0.6, 3.25, 5.6, 3.0, ["업종", "당월 매출"], sd["top_industries"], col_ratios=[3.6, 2.0])
+        _textbox(slide, 0.6, 2.85, 5.6, 0.35, "업종별 매출 · 점포수 Top 5", size=13, bold=True, color=NAVY)
+        _table(slide, 0.6, 3.25, 5.6, 3.0, ["업종", "당월 매출", "점포수"], sd["top_industries"], col_ratios=[3.0, 2.0, 1.6])
 
     if sd.get("weekday"):
         _textbox(slide, 6.6, 2.85, 6.1, 0.35, "요일별 매출 (억원)", size=13, bold=True, color=NAVY)
@@ -866,41 +891,37 @@ _DATA_SOURCES = [
     "국토교통부 건축HUB 건축물대장정보 서비스 (표제부 · 주택가격 · 지역지구구역 등)",
     "국토교통부 실거래가 공개시스템 (PublicDataReader 경유)",
     "한국부동산원 R-ONE 부동산통계정보시스템 (중대형 상가 공실률)",
-    "소상공인시장진흥공단 상가(상권)정보 Open API (반경 상가업소)",
-    "서울 열린데이터광장 우리마을가게 상권분석서비스 (서울 소재 주소만 해당)",
+    "서울 열린데이터광장 우리마을가게 상권분석서비스 (업종별 매출 · 점포수 · 소비자특성, 서울 소재 주소만 해당)",
+    "소상공인시장진흥공단 상가(상권)정보 Open API (서울 열린데이터광장을 쓸 수 없을 때의 대체 데이터)",
     "카카오맵 Local API (주소 지오코딩)",
+    "업로드한 건축물대장 열람본 이미지 OCR (소유자현황 · 변동사항 · 위반건축물 상세)",
 ]
 
 _APPENDIX_DISCLAIMER = (
     "· 본 리포트는 공공데이터 API 응답을 자동 집계한 참고 자료이며, 법적 효력이 있는 감정평가 · 중개 문서가 아닙니다.\n"
-    "· 공시가격은 시세가 아닙니다(통상 시세의 60~70% 수준, 연도별 현실화율 정책 변동 포함).\n"
+    "· 공시가격은 시세가 아닙니다(통상 시세의 60~70% 수준, 연도별 현실화율 정책 변동 포함). 동단위 주변사례 평균 · "
+    "중앙값 · 백분위는 참고용 비교치일 뿐 감정평가액이 아닙니다.\n"
     "· 개발호재 · SWOT 항목은 작성자가 사이드바에 직접 입력한 내용이 있을 때만 표시되며, 자동 생성되지 않습니다.\n"
-    "· 실거래가는 지번 일치 기준으로 매칭되며, 동일 건물이라도 지번 표기 차이로 누락될 수 있습니다."
+    "· 실거래가는 대상 물건 좌표 기준 반경 200m 이내 거래를 지오코딩으로 매칭한 결과입니다. 좌표 확보(지오코딩)에 "
+    "실패한 거래는 반경 계산에서 제외될 수 있습니다.\n"
+    "· 상권 데이터는 서울 열린데이터광장 상권코드 단위로 집계되며, 대상 주소가 속한 상권 전체의 통계입니다 — "
+    "개별 건물 단위 수치가 아닙니다."
 )
 
 
-def _ledger_attachment_slide_factory(attachment):
-    """업로드된 건축물대장 열람본 이미지 1장을 그대로 붙여넣는 슬라이드를 만든다.
-    위반건축물 여부·소유자현황·변동사항은 공공API로 제공되지 않아, 사용자가 업로드한
-    원본 이미지를 리포트에 그대로 첨부하는 것이 가장 정확하다(OCR 요약으로 대체하지 않음)."""
-    def render(prs, data):
-        slide = _new_slide(prs)
-        label = f"첨부 — 건축물대장 열람본 ({attachment['filename']})" if attachment.get("filename") else "첨부 — 건축물대장 열람본"
-        _section_title(slide, label)
-        if attachment.get("is_violation"):
-            _textbox(slide, 0.6, 1.1, 11.5, 0.35, "🚩 위반건축물 표기 감지됨", size=13, bold=True, color=TERRACOTTA)
-
-        box_x, box_y, box_w, box_h = 0.6, 1.55, 12.1, 5.4
-        img_stream = io.BytesIO(attachment["image_bytes"])
-        with Image.open(io.BytesIO(attachment["image_bytes"])) as im:
-            img_w, img_h = im.size
-        scale = min(box_w / img_w, box_h / img_h)
-        draw_w, draw_h = img_w * scale, img_h * scale
-        draw_x = box_x + (box_w - draw_w) / 2
-        draw_y = box_y + (box_h - draw_h) / 2
-        slide.shapes.add_picture(img_stream, _sx(draw_x), _sy(draw_y), _sx(draw_w), _sy(draw_h))
-        _page_footer(slide, data["address"], "건축물대장 열람본 (업로드, 참고용)")
-    return render
+def _address_ledger_content_slide(prs, data):
+    """업로드된 건축물대장 열람본 이미지를 그대로 붙이는 대신, OCR로 추출한
+    소유자현황·변동사항·관계자·위반건축물 내용을 이 리포트의 다른 슬라이드와 같은
+    표/텍스트 형식으로 정리해서 보여준다. generate_ledger_pptx()의 열람본 전용
+    리포트가 이미 쓰고 있는 _ledger_owner_history_slide()를 그대로 재사용한다."""
+    content = data.get("ledger_content")
+    if not content:
+        return
+    _ledger_owner_history_slide(
+        prs, data["address"], content["owners"], content["changes"],
+        firms=content.get("firms"), builder=content.get("builder"),
+        violation_detail=content.get("violation_detail"),
+    )
 
 
 def _appendix_slide(prs, data):
@@ -955,7 +976,6 @@ def _slide_plan(data):
     dist = data.get("district") or {}
     com = data.get("commercial") or {}
     swot = data.get("swot") or {}
-    attachments = data.get("ledger_attachments") or []
 
     return [
         (1, "핵심 요약", _summary_slide),
@@ -968,7 +988,7 @@ def _slide_plan(data):
         (2, "동단위 시장 통계 — 주용도별", _district_mix_slide) if dist.get("mix") else None,
         (2, "공시가격 시계열", _price_history_slide) if data.get("price_history", {}).get("trend") else None,
         (2, "상권 개황", _commercial_slide) if (com.get("vacancy_trend") or com.get("top_industries")) else None,
-        (2, "반경 상가업소 상세", _nearby_stores_detail_slide) if com.get("store_list") else None,
+        (2, "상권 업종 상세", _nearby_stores_detail_slide) if com.get("store_list") else None,
         (2, "상권영역 지도", _trade_area_map_slide) if data.get("trade_area_map") else None,
         (2, "서울 상권 상세", _seoul_detail_slide) if data.get("seoul_trade_area") else None,
         (2, "서울 상권 상세 — 소비자 특성", _seoul_detail_slide2)
@@ -978,10 +998,7 @@ def _slide_plan(data):
         (3, "SWOT 분석", _swot_slide) if any(swot.get(k) for k in ("strengths", "weaknesses", "opportunities", "threats")) else None,
         (3, "핵심지표 종합 비교표", _key_metrics_table_slide),
         (3, "종합 의견", _conclusion_slide),
-    ] + [
-        (3, f"건축물대장 열람본 첨부 {i + 1}", _ledger_attachment_slide_factory(att))
-        for i, att in enumerate(attachments)
-    ] + [
+        (3, "소유자현황 · 변동사항 (OCR)", _address_ledger_content_slide) if data.get("ledger_content") else None,
         (3, "부록 — 데이터 출처 및 유의사항", _appendix_slide),
     ]
 
@@ -1109,6 +1126,7 @@ def _build_transactions(master, months_lookback):
             if c in df.columns:
                 sort_col = c
                 break
+        has_distance = "거리(m)" in df.columns
         sorted_df = df.sort_values(sort_col, ascending=False) if sort_col else df
         for _, row in sorted_df.head(8).iterrows():
             date_label = _format_tx_date(row)
@@ -1117,11 +1135,14 @@ def _build_transactions(master, months_lookback):
             price = _tx_field(row, ["거래금액", "물건금액"])
             price_num = pd.to_numeric(str(price).replace(",", ""), errors="coerce") if price is not None else None
             price_label = f"{price_num / 1e4:.1f}억" if pd.notna(price_num) else (str(price) if price else "-")
+            dist = row.get("거리(m)") if has_distance else None
+            dist_label = f"{int(dist)}m" if pd.notna(dist) else "-"
             rows.append([
                 date_label,
                 f"{floor}층" if floor not in (None, "") else "-",
                 f"{float(area):.1f}㎡" if area not in (None, "") and pd.notna(pd.to_numeric(area, errors="coerce")) else "-",
                 price_label,
+                dist_label,
             ])
             if pd.notna(price_num):
                 trend.append({"label": date_label, "value": round(float(price_num) / 1e4, 1)})
@@ -1174,11 +1195,16 @@ def _build_district(master):
     return result
 
 
-def _build_price_history(master):
+def _build_price_history(master, district_price_df=None):
+    """공시가격 시계열 + 동단위 주변사례 평균/중앙값/백분위(analyze_district_price_stats).
+
+    동단위 통계는 지번 없이(전체 동) 조회한 district_price_df를 집계만 하므로
+    API 재호출 없이 계산되며, 대상 물건이 동 전체에서 상위 몇 %인지까지 붙여
+    공시가격 문구를 "주변사례 평균 대비"로 더 정확하게 만든다."""
     ph = master.get("공시가격") or {}
     units = ph.get("단위목록") or []
     if not units:
-        return {"trend": [], "rows": [], "note": ph.get("경고")}
+        return {"trend": [], "rows": [], "note": ph.get("경고"), "district": None}
     unit = units[0]
     timeline = unit.get("추이")
     trend = []
@@ -1196,13 +1222,49 @@ def _build_price_history(master):
     cagr = unit.get("연평균상승률CAGR(%)")
     if cagr is not None:
         note = f"연평균(CAGR) 약 {cagr:.1f}% {'상승' if cagr >= 0 else '하락'}하는 흐름을 보이고 있습니다."
-    return {"trend": trend, "rows": rows, "note": note}
+
+    district = None
+    subject_price = unit.get("최신가격")
+    subject_price_eok = (subject_price / 1e8) if subject_price else None
+    dstats = analyze_district_price_stats(district_price_df, subject_price_eok=subject_price_eok)
+    summary = dstats.get("총괄") or {}
+    if summary:
+        percentile = dstats.get("백분위")
+        district = {
+            "평균": summary.get("평균공시가격(억)"), "중앙값": summary.get("중앙값공시가격(억)"),
+            "호수": summary.get("호수(유닛수)"), "기준연도": summary.get("기준연도"),
+            "상위백분율": round(100 - percentile, 1) if percentile is not None else None,
+        }
+        district_note = (
+            f"동 전체(호수 {district['호수']:,}건, {district['기준연도']}년 기준) 주변사례 평균 공시가격은 "
+            f"{district['평균']:.2f}억(중앙값 {district['중앙값']:.2f}억)입니다."
+        )
+        if district["상위백분율"] is not None:
+            district_note += f" 대상 물건은 동 전체에서 상위 {district['상위백분율']:.0f}% 수준입니다."
+        note = f"{note} {district_note}" if note else district_note
+
+    return {"trend": trend, "rows": rows, "note": note, "district": district}
 
 
-def _build_commercial(reb_key, sangkwon_key, dong_name, lon, lat):
-    """공실률/주변 상가업소 조회. 실패 사유를 삼키지 않고 result["notes"]에 남겨서
-    리포트에 왜 이 섹션이 비었는지 대시보드에서 그대로 보여줄 수 있게 한다."""
-    result = {"vacancy_trend": [], "vacancy_label": "", "top_industries": [], "store_list": [], "notes": []}
+def _build_commercial(reb_key, sangkwon_key, dong_name, lon, lat, seoul_detail=None):
+    """공실률/주변 업종 조회. 실패 사유를 삼키지 않고 result["notes"]에 남겨서
+    리포트에 왜 이 섹션이 비었는지 대시보드에서 그대로 보여줄 수 있게 한다.
+
+    업종 Top5·업종 상세표는 "상권분석은 data.seoul.go.kr 중심"이라는 방침에 따라
+    seoul_detail(서울 열린데이터광장 우리마을가게 상권분석서비스, _build_seoul()의
+    결과)이 있으면 그걸 우선 쓴다. 소상공인시장진흥공단 상가업소 API(전국 대상,
+    분류가 거친 업종 소분류 — "펜션" 등 부정확해 보이는 카테고리가 섞여 있음)는
+    서울 데이터를 못 쓸 때(비서울 주소, 서울 키 미입력)만 대체용으로 쓴다."""
+    result = {
+        "vacancy_trend": [], "vacancy_label": "", "top_industries": [], "store_list": [],
+        "store_list_cols": None, "area_name": None, "notes": [],
+    }
+
+    if seoul_detail and (seoul_detail.get("industry_by_count") or seoul_detail.get("industry_full_table")):
+        result["area_name"] = seoul_detail.get("name")
+        result["top_industries"] = seoul_detail.get("industry_by_count") or []
+        result["store_list"] = seoul_detail.get("industry_full_table") or []
+        result["store_list_cols"] = ["업종", "당월매출", "점포수", "개업률", "폐업률"]
 
     if not reb_key:
         result["notes"].append("공실률: 한국부동산원 인증키 미입력")
@@ -1235,15 +1297,17 @@ def _build_commercial(reb_key, sangkwon_key, dong_name, lon, lat):
         except Exception as e:
             result["notes"].append(f"공실률: 조회 오류 ({e})")
 
-    if not sangkwon_key:
-        result["notes"].append("주변 상가업소: 소상공인시장진흥공단 인증키 미입력")
+    if result["top_industries"]:
+        pass  # 서울 열린데이터광장 데이터를 이미 채웠으므로 소상공인 API는 건너뜀.
+    elif not sangkwon_key:
+        result["notes"].append("주변 업종: 소상공인시장진흥공단 인증키 미입력 (서울 열린데이터광장도 사용 불가)")
     elif not (lon and lat):
-        result["notes"].append("주변 상가업소: 좌표(지오코딩) 실패로 조회 불가")
+        result["notes"].append("주변 업종: 좌표(지오코딩) 실패로 조회 불가")
     else:
         try:
             stores_df = get_nearby_stores(sangkwon_key, lon, lat, radius=500)
             if stores_df is None or stores_df.empty or "indsLclsNm" not in stores_df.columns:
-                result["notes"].append("주변 상가업소: 반경 500m 내 데이터 없음")
+                result["notes"].append("주변 업종: 반경 500m 내 데이터 없음")
             else:
                 counts = stores_df["indsSclsNm"].value_counts().head(5)
                 result["top_industries"] = [{"label": k, "value": int(v)} for k, v in counts.items()]
@@ -1258,14 +1322,20 @@ def _build_commercial(reb_key, sangkwon_key, dong_name, lon, lat):
                     ]
                     for _, row in top10.iterrows()
                 ]
+                result["store_list_cols"] = ["상호명", "업종", "주소", "거리"]
         except Exception as e:
-            result["notes"].append(f"주변 상가업소: 조회 오류 ({e})")
+            result["notes"].append(f"주변 업종: 조회 오류 ({e})")
     return result
 
 
-def _build_seoul(seoul_key, lon, lat):
+def _build_seoul(seoul_key, lon, lat, dong_name=""):
     """반환값 3번째는 실패 사유(성공 시 None) — 서울 상권분석/상권영역 지도가 왜 빠졌는지
-    대시보드에 그대로 보여주기 위함."""
+    대시보드에 그대로 보여주기 위함.
+
+    dong_name(예: "이태원동")을 넘기면 상권명에 그 동 이름이 포함된 상권을
+    우선 매칭한다 — 단순 최근접만 쓰면 상권 경계가 촘촘한 지역에서 이름이
+    다른 인접 상권이 뽑힐 수 있어, "상권영역이 실제 동과 다르게 나온다"는
+    혼선을 줄이기 위함이다."""
     if not seoul_key:
         return None, None, "서울 열린데이터광장 인증키 미입력"
     if not lon or not lat:
@@ -1274,7 +1344,8 @@ def _build_seoul(seoul_key, lon, lat):
         locations_df = get_seoul_trade_area_locations(seoul_key)
         if locations_df is None or locations_df.empty:
             return None, None, "서울시 상권 목록 응답이 비어 있음"
-        trdar_row, dist_m = find_nearest_seoul_trade_area(locations_df, lon, lat)
+        keyword = dong_name[:-1] if dong_name and dong_name.endswith("동") else dong_name
+        trdar_row, dist_m = find_nearest_seoul_trade_area(locations_df, lon, lat, keyword=keyword)
         if dist_m > 1500:
             return None, None, f"가장 가까운 서울시 상권이 {dist_m:.0f}m 떨어져 있어(1.5km 초과) 매칭하지 않음"
         name = trdar_row["TRDAR_CD_NM"]
@@ -1296,12 +1367,32 @@ def _build_seoul(seoul_key, lon, lat):
             stats.append({"label": "직장인구 (분기)", "value": f"{s['직장인구']:,.0f}명"})
 
         top_industries = []
+        industry_by_count = []
+        industry_full_table = []
         weekday = []
-        if not detail["업종별"].empty:
-            top5 = detail["업종별"].head(5)
+        industry_df = detail["업종별"]
+        if not industry_df.empty:
+            top5 = industry_df.head(5)
             top_industries = [
-                [r["SVC_INDUTY_CD_NM"], f"{r['THSMON_SELNG_AMT'] / 1e8:.1f}억"] for _, r in top5.iterrows()
+                [
+                    r["SVC_INDUTY_CD_NM"], f"{r['THSMON_SELNG_AMT'] / 1e8:.1f}억",
+                    f"{int(r['STOR_CO'])}개" if pd.notna(r.get("STOR_CO")) else "-",
+                ]
+                for _, r in top5.iterrows()
             ]
+            if "STOR_CO" in industry_df.columns:
+                by_count = industry_df.dropna(subset=["STOR_CO"]).sort_values("STOR_CO", ascending=False).head(5)
+                industry_by_count = [
+                    {"label": r["SVC_INDUTY_CD_NM"], "value": int(r["STOR_CO"])} for _, r in by_count.iterrows()
+                ]
+            for _, r in industry_df.head(15).iterrows():
+                industry_full_table.append([
+                    r["SVC_INDUTY_CD_NM"],
+                    f"{r['THSMON_SELNG_AMT'] / 1e8:.1f}억" if pd.notna(r.get("THSMON_SELNG_AMT")) else "-",
+                    f"{int(r['STOR_CO'])}개" if pd.notna(r.get("STOR_CO")) else "-",
+                    f"{r['OPBIZ_RT']:.1f}%" if pd.notna(r.get("OPBIZ_RT")) else "-",
+                    f"{r['CLSBIZ_RT']:.1f}%" if pd.notna(r.get("CLSBIZ_RT")) else "-",
+                ])
         if not detail["요일별매출"].empty:
             weekday = [
                 {"label": r["요일"], "value": r["매출액(억원)"]} for _, r in detail["요일별매출"].iterrows()
@@ -1319,6 +1410,7 @@ def _build_seoul(seoul_key, lon, lat):
             "name": name, "stats": stats, "top_industries": top_industries, "weekday": weekday,
             "gender": gender, "age": age, "weekend_mix": weekend_mix, "store": store,
             "insights": detail["인사이트"],
+            "industry_by_count": industry_by_count, "industry_full_table": industry_full_table,
         }
         trade_area_map = {"name": name, "lat": trdar_row["lat"], "lon": trdar_row["lon"]}
         return seoul_detail, trade_area_map, None
@@ -1406,11 +1498,21 @@ def fetch_report_data(
     except Exception:
         district_title_df = None
 
+    _progress("동단위 공시가격 조회 중...")
+    try:
+        district_price_df = get_building_ledger(
+            api, ledger_type="주택가격", sigungu_code=sigungu_code, bdong_code=bdong_code,
+            max_rows=10000, wait_time=0.15,
+        )
+    except Exception:
+        district_price_df = None
+
     _progress("건축물대장·실거래가·공시가격 조회 중...")
     master = build_master_report(
         api, tp_api, sigungu_code, bdong_code, bun, ji,
         months_lookback=months_lookback, district_title_df=district_title_df,
-        sido=sido, sigungu_name=sigungu_name, vworld_key=vworld_key, kakao_key=kakao_key,
+        sido=sido, sigungu_name=sigungu_name, dong_name=dong_name,
+        vworld_key=vworld_key, kakao_key=kakao_key,
     )
 
     data = {
@@ -1533,17 +1635,14 @@ def fetch_report_data(
     else:
         notes.append(f"실거래가 동향: 최근 {months_lookback}개월 내 거래 내역 없음")
 
-    _progress("공시가격 시계열 분석 중...")
-    data["price_history"] = _build_price_history(master)
+    _progress("공시가격 시계열 · 동단위 주변사례 분석 중...")
+    data["price_history"] = _build_price_history(master, district_price_df)
     if not data["price_history"]["trend"]:
         notes.append("공시가격 시계열: 시계열 데이터 없음")
 
-    _progress("상업용부동산 공실률 · 주변 상가업소 조회 중...")
-    data["commercial"] = _build_commercial(reb_key, sangkwon_key, dong_name, lon, lat)
-    notes.extend(data["commercial"].get("notes") or [])
-    if data["commercial"]["vacancy_trend"]:
-        summary_stats.append({"label": "공실률", "value": f"{data['commercial']['vacancy_trend'][-1]['value']}%", "sub": data["commercial"]["vacancy_label"]})
-
+    # 서울 상권분석을 상권 개황(commercial)보다 먼저 구해서, 업종 Top5/상세표를
+    # (전국 대상이라 분류가 거친 소상공인 API 대신) 서울 열린데이터광장 데이터로
+    # 채울 수 있게 한다 — "상권분석은 data.seoul.go.kr 중심" 방침.
     is_seoul = sido.startswith("서울")
     seoul_detail, trade_area_map = None, None
     if not is_seoul:
@@ -1552,7 +1651,7 @@ def fetch_report_data(
         notes.append("서울 상권분석·상권영역 지도: 서울 열린데이터광장 인증키 미입력")
     else:
         _progress("서울 상권분석 데이터 조회 중... (최초 1회, 최대 1분 정도 걸릴 수 있습니다)")
-        seoul_detail, trade_area_map, seoul_reason = _build_seoul(seoul_key, lon, lat)
+        seoul_detail, trade_area_map, seoul_reason = _build_seoul(seoul_key, lon, lat, dong_name=dong_name)
         if seoul_reason:
             notes.append(f"서울 상권분석·상권영역 지도: {seoul_reason}")
     data["seoul_trade_area"] = seoul_detail
@@ -1564,6 +1663,12 @@ def fetch_report_data(
         data["trade_area_map"] = {"name": trade_area_map["name"], "map_image": map_buf2}
     else:
         data["trade_area_map"] = None
+
+    _progress("상업용부동산 공실률 · 주변 업종 조회 중...")
+    data["commercial"] = _build_commercial(reb_key, sangkwon_key, dong_name, lon, lat, seoul_detail=seoul_detail)
+    notes.extend(data["commercial"].get("notes") or [])
+    if data["commercial"]["vacancy_trend"]:
+        summary_stats.append({"label": "공실률", "value": f"{data['commercial']['vacancy_trend'][-1]['value']}%", "sub": data["commercial"]["vacancy_label"]})
 
     data["summary_stats"] = summary_stats
 
@@ -1592,11 +1697,12 @@ def fetch_report_data(
     _progress("종합 의견 정리 중...")
     data["conclusion"] = _build_conclusion(master, data)
 
-    data["ledger_attachments"] = ledger_docs
+    data["ledger_content"] = extract_ledger_content(ledger_docs) if ledger_docs else None
     if ledger_docs:
         data["notes"].append(
-            f"업로드한 건축물대장 열람본 {len(ledger_docs)}장을 리포트 끝에 원본 그대로 첨부했습니다. "
-            "위반건축물 여부는 OCR로 자동 감지했지만, 소유자현황·변동사항은 첨부 이미지를 직접 확인하세요."
+            f"업로드한 건축물대장 열람본 {len(ledger_docs)}장에서 OCR로 소유자현황·변동사항·위반건축물 여부를 "
+            "추출해 리포트 끝의 '소유자현황 · 변동사항' 슬라이드로 정리했습니다. 표 셀 인식 특성상 오탈자가 "
+            "있을 수 있어 정확한 값은 대시보드에 표시된 원본 이미지와 대조하는 것을 권장합니다."
         )
 
     return data

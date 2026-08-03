@@ -1490,9 +1490,22 @@ def get_seoul_trade_area_locations(seoul_key: str) -> pd.DataFrame:
     return df
 
 
-def find_nearest_seoul_trade_area(locations_df: pd.DataFrame, lon: float, lat: float):
-    """(lon, lat)에서 가장 가까운 서울 상권 1건을 (해당 row, 거리(m)) 튜플로 반환."""
+def find_nearest_seoul_trade_area(locations_df: pd.DataFrame, lon: float, lat: float, keyword: str = None):
+    """(lon, lat)에서 가장 가까운 서울 상권 1건을 (해당 row, 거리(m)) 튜플로 반환.
+
+    keyword(보통 동 이름, 예: "이태원")를 넘기면, 상권명(TRDAR_CD_NM)에 그
+    키워드가 포함된 상권 중 가장 가까운 곳을 우선한다(단, 3km보다 멀면
+    무시하고 순수 최근접으로 대체) — 단순 최근접만 쓰면 상권 경계가 촘촘한
+    지역에서 엉뚱한 인접 상권(예: 옆 동)이 뽑혀 이름이 안 맞아 보일 수 있다.
+    """
     distances = _haversine_m(lat, lon, locations_df["lat"], locations_df["lon"])
+    if keyword:
+        name_match = locations_df["TRDAR_CD_NM"].astype(str).str.contains(keyword, na=False)
+        candidates = distances[name_match]
+        if not candidates.empty:
+            idx = candidates.idxmin()
+            if candidates.loc[idx] <= 3000:
+                return locations_df.loc[idx], float(candidates.loc[idx])
     idx = distances.idxmin()
     return locations_df.loc[idx], float(distances.loc[idx])
 
@@ -1730,12 +1743,19 @@ def match_transactions_to_parcel(
     months_lookback: int = 12,
     sido: str = "",
     sigungu_name: str = "",
+    dong_name: str = "",
+    kakao_key: str = None,
+    target_coord=None,
+    radius_m: float = 200,
 ) -> dict:
-    """추정된 property_type으로 최근 N개월 실거래가를 받아 이 번지(bun/ji)와 정확히 일치하는 건만 추림.
+    """추정된 property_type으로 최근 N개월 실거래가를 받아, 대상 좌표(target_coord) 기준
+
+    반경 radius_m 이내(기본 200m) 거래만 추림. kakao_key/target_coord가 없으면 이
+    번지(bun/ji)와 정확히 일치하는 건만 추리는 예전 방식으로 대체 동작한다.
 
     반환되는 DataFrame에는 시도+시군구+법정동(동)+지번을 합친 '주소' 컬럼이
     포함된다 — 지번만으로는 어느 동인지 알 수 없어 부정확하므로 항상 동
-    단위까지 표시한다.
+    단위까지 표시한다. 반경 매칭 결과에는 '거리(m)' 컬럼도 함께 붙는다.
 
     상업업무용은 지번이 마스킹(예: '소격동 8*')돼 공개되므로 완전한 특정이
     불가능하다 — 이 경우 deal-locator MCP의 역매칭 기능을 안내한다.
@@ -1762,14 +1782,46 @@ def match_transactions_to_parcel(
         }
 
     df = add_address_column(df, sido=sido, sigungu_name=sigungu_name)
+    masked = property_type == "상업업무용"
 
+    if kakao_key and target_coord:
+        lon0, lat0 = target_coord
+        # 반경 200m는 거의 항상 같은 법정동 안에 있으므로, 먼저 동으로 좁혀서
+        # 지오코딩할 주소 수를 줄인다(구 전체를 다 지오코딩하면 너무 느림).
+        scoped = df
+        if dong_name and "법정동" in df.columns:
+            in_dong = df[df["법정동"].astype(str).str.strip() == dong_name.strip()]
+            if not in_dong.empty:
+                scoped = in_dong
+
+        geocoded = add_coordinates_column(scoped, kakao_key, address_col="주소", wait_time=0.1)
+        geocoded = geocoded.dropna(subset=["경도", "위도"]) if geocoded is not None else pd.DataFrame()
+
+        if geocoded.empty:
+            note = f"반경 {radius_m:.0f}m 이내 {property_type} {trade_type} 거래의 좌표를 확인하지 못했습니다."
+            if masked:
+                note += " 상업업무용은 지번이 마스킹되어 공개되어 완전한 특정이 어렵습니다 — deal-locator MCP의 역매칭 기능을 이용해보세요."
+            return {"status": "no_match", "df": df, "note": note}
+
+        geocoded = geocoded.copy()
+        geocoded["거리(m)"] = _haversine_m(lat0, lon0, geocoded["위도"], geocoded["경도"]).round(0)
+        matched = geocoded[geocoded["거리(m)"] <= radius_m].sort_values("거리(m)").reset_index(drop=True)
+
+        if matched.empty:
+            note = f"최근 {months_lookback}개월 내 반경 {radius_m:.0f}m 이내 {property_type} {trade_type} 거래를 찾지 못했습니다."
+            if masked:
+                note += " 상업업무용은 지번이 마스킹되어 공개되어 완전한 특정이 어렵습니다 — deal-locator MCP의 역매칭 기능을 이용해보세요."
+            return {"status": "no_match", "df": df, "note": note}
+
+        return {"status": "matched", "df": matched, "note": f"반경 {radius_m:.0f}m 이내 {len(matched)}건 매칭됨"}
+
+    # 좌표가 없을 때(지오코딩 실패 등)의 예전 방식 대체 동작: 번지 정확 일치.
     bun_i = int(bun) if bun else None
     ji_i = int(ji) if ji else 0
     target_jibun = f"{bun_i}-{ji_i}" if ji_i else str(bun_i)
 
     matched = df[df["지번"].astype(str).str.strip() == target_jibun] if bun_i else pd.DataFrame()
 
-    masked = property_type == "상업업무용"
     if matched.empty:
         note = f"최근 {months_lookback}개월 내 이 번지({target_jibun})의 {property_type} {trade_type} 거래를 찾지 못했습니다."
         if masked:
@@ -1790,8 +1842,10 @@ def build_master_report(
     district_title_df: pd.DataFrame = None,
     sido: str = "",
     sigungu_name: str = "",
+    dong_name: str = "",
     vworld_key: str = None,
     kakao_key: str = None,
+    transactions_radius_m: float = 200,
 ) -> dict:
     """지번 하나에 대해 단일조회·실거래가·노후도·내진·공시가격(+선택적 동단위 비교)을 한 번에 모은 종합 리포트
 
@@ -1802,6 +1856,9 @@ def build_master_report(
     이 용도지역 조회(req/data)도 같은 "브이월드 Open API" 공지 범주라 배포본에서
     똑같이 막혀 있을 가능성이 높다 — 아직 배포 환경에서 별도로 확인되진 않았으니,
     이 기능도 안 되면 카카오 등 대체 데이터 소스가 필요하다.
+
+    실거래가는 반경(transactions_radius_m, 기본 200m) 매칭을 쓰므로 좌표를 먼저
+    확보해야 한다 — 그래서 좌표 지오코딩을 실거래가 매칭보다 앞으로 옮겼다.
     """
     result = {}
 
@@ -1809,13 +1866,27 @@ def build_master_report(
                                     bdong_code=bdong_code, bun=bun, ji=ji)
     result["표제부"] = title_df
 
+    result["브이월드용도지역"] = {}
+    result["좌표"] = None
+    if kakao_key and title_df is not None and not title_df.empty:
+        road_addr = title_df.iloc[0].get("도로명대지위치")
+        parcel_addr = title_df.iloc[0].get("대지위치")
+        coord, _reason = geocode_address_kakao(kakao_key, road_addr) if road_addr else (None, None)
+        if not coord and parcel_addr:
+            coord, _reason = geocode_address_kakao(kakao_key, parcel_addr)
+        if coord:
+            result["좌표"] = coord
+            if vworld_key:
+                result["브이월드용도지역"] = get_vworld_zoning_detail(vworld_key, coord[0], coord[1])
+
     if title_df is not None and not title_df.empty:
         purpose = title_df.iloc[0].get("주용도코드명")
         ptype = guess_property_type(purpose)
         result["추정부동산유형"] = ptype
         result["실거래가"] = match_transactions_to_parcel(
             tp_api, ptype, "매매", sigungu_code, bun, ji, months_lookback=months_lookback,
-            sido=sido, sigungu_name=sigungu_name,
+            sido=sido, sigungu_name=sigungu_name, dong_name=dong_name,
+            kakao_key=kakao_key, target_coord=result["좌표"], radius_m=transactions_radius_m,
         )
         result["노후도"] = analyze_old_buildings(title_df, min_age_years=0)
         result["내진분석"] = analyze_seismic_risk(title_df, top_n=1)
@@ -1836,19 +1907,6 @@ def build_master_report(
         bun=bun, ji=ji,
     )
     result["지역지구"] = summarize_zoning(zoning_df)
-
-    result["브이월드용도지역"] = {}
-    result["좌표"] = None
-    if kakao_key and title_df is not None and not title_df.empty:
-        road_addr = title_df.iloc[0].get("도로명대지위치")
-        parcel_addr = title_df.iloc[0].get("대지위치")
-        coord, _reason = geocode_address_kakao(kakao_key, road_addr) if road_addr else (None, None)
-        if not coord and parcel_addr:
-            coord, _reason = geocode_address_kakao(kakao_key, parcel_addr)
-        if coord:
-            result["좌표"] = coord
-            if vworld_key:
-                result["브이월드용도지역"] = get_vworld_zoning_detail(vworld_key, coord[0], coord[1])
 
     if district_title_df is not None and not district_title_df.empty:
         result["동단위통계"] = analyze_district_stats(district_title_df)
