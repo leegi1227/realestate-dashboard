@@ -1695,7 +1695,7 @@ def fetch_report_data(
         else:
             district_title_df = get_building_ledger(
                 api, ledger_type="표제부", sigungu_code=sigungu_code, bdong_code=bdong_code,
-                max_rows=10000, wait_time=0.15,
+                max_rows=10000, wait_time=0.5,
             )
     except Exception:
         district_title_df = None
@@ -1707,7 +1707,7 @@ def fetch_report_data(
         else:
             district_price_df = get_building_ledger(
                 api, ledger_type="주택가격", sigungu_code=sigungu_code, bdong_code=bdong_code,
-                max_rows=10000, wait_time=0.15,
+                max_rows=10000, wait_time=0.5,
             )
     except Exception:
         district_price_df = None

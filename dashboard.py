@@ -250,7 +250,13 @@ def _load_sigungu_list():
 
 @st.cache_data(ttl=900, show_spinner=False)
 def _load_district_titles(service_key: str, sigungu_code: str, bdong_code: str):
-    """동 전체 표제부를 15분 캐시. 동단위 통계/노후건축물/내진 스캔 탭이 공유한다."""
+    """동 전체 표제부를 15분 캐시. 동단위 통계/노후건축물/내진 스캔 탭이 공유한다.
+
+    wait_time=0.15는 밀집 지역(예: 이태원동)처럼 페이지 수가 많은 동에서 건축HUB
+    게이트웨이가 HTTP 502(HTTP_ERROR)를 내는 게 실제 관찰됐다 — 단일 지번 조회는
+    멀쩡히 되는데 대량 페이지네이션에서만 나는 것으로 보아 순간 요청 속도 문제로
+    보인다. 요청 간격을 넉넉히 둬서 이를 줄인다(개별 요청 자체는 이미 재시도됨).
+    """
     api = BuildingLedger(service_key)
     return get_building_ledger(
         api,
@@ -258,7 +264,7 @@ def _load_district_titles(service_key: str, sigungu_code: str, bdong_code: str):
         sigungu_code=sigungu_code,
         bdong_code=bdong_code,
         max_rows=10000,
-        wait_time=0.15,
+        wait_time=0.5,
     )
 
 
@@ -269,6 +275,9 @@ def _load_district_prices(service_key: str, sigungu_code: str, bdong_code: str):
     동일한 방식(동 단위 페이지네이션)으로 동 전체 호(관리건축물대장PK)의 공시가격 이력을
     한 번에 받아온다 — 필지별로 API를 반복 호출하지 않는다. 아파트 등은 건물 1개에 호가
     수십~수백 개라 표제부보다 행 수가 훨씬 많을 수 있어 max_rows를 더 넉넉히 둔다.
+
+    wait_time은 _load_district_titles와 같은 이유(대량 페이지네이션에서 관찰된 HTTP 502)로
+    0.5초로 늘렸다.
     """
     api = BuildingLedger(service_key)
     return get_building_ledger(
@@ -277,7 +286,7 @@ def _load_district_prices(service_key: str, sigungu_code: str, bdong_code: str):
         sigungu_code=sigungu_code,
         bdong_code=bdong_code,
         max_rows=20000,
-        wait_time=0.15,
+        wait_time=0.5,
     )
 
 
