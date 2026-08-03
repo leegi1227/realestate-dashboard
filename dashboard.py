@@ -1671,6 +1671,8 @@ with tab_flpop:
                         "실제 데이터에 담긴 코드 예시(앞 10개):"
                     )
                     st.code(", ".join(flpop_result_dict["sample_codes"]))
+                    st.caption("전체 컬럼 목록 (행정동 이름 컬럼이 따로 있는지 확인용):")
+                    st.code(", ".join(flpop_result_dict["citywide_cols"]))
             else:
                 st.success(f"'{used_label}' (행정동코드 {used_code}) · 기준일자 {used_date} · {len(flpop_df)}건 조회됨")
                 flpop_analysis = analyze_seoul_living_population(flpop_df)
