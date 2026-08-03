@@ -51,6 +51,8 @@ from building_example import (
     SEOUL_TRDAR_STORE_SERVICE,
     SEOUL_TRDAR_FLPOP_SERVICE,
     SEOUL_TRDAR_WRC_POPLTN_SERVICE,
+    get_seoul_living_population,
+    analyze_seoul_living_population,
     reverse_match_transactions,
     split_common_and_varying,
 )
@@ -524,10 +526,10 @@ def _render_ledger_docs_section(ledger_docs):
                 st.caption("텍스트를 인식하지 못했습니다 — 위 이미지로 직접 확인하세요.")
 
 
-tab_single, tab_report, tab_price, tab_district, tab_old, tab_map, tab_geocode, tab_commercial, tab_sangkwon, tab_seoul, tab_autopptx = st.tabs([
+tab_single, tab_report, tab_price, tab_district, tab_old, tab_map, tab_geocode, tab_commercial, tab_sangkwon, tab_seoul, tab_flpop, tab_autopptx = st.tabs([
     "🔍 단일 조회", "📋 종합 리포트", "💰 실거래가",
     "📊 동단위 통계", "🏚️ 노후건축물", "🗺️ 지도 업로드",
-    "📍 지오코딩", "🏬 상업용부동산 공실률", "🏪 주변 상가업소", "🏙️ 서울 상권분석", "📑 자동 pptx 리포트",
+    "📍 지오코딩", "🏬 상업용부동산 공실률", "🏪 주변 상가업소", "🏙️ 서울 상권분석", "🚶 유동인구", "📑 자동 pptx 리포트",
 ])
 
 # ------------------------------------------------------------------
@@ -1589,7 +1591,83 @@ with tab_seoul:
             render_address_map(map_df, label_col="표시", vworld_key=vworld_key, highlight_lat=lat, highlight_lon=lon)
 
 # ------------------------------------------------------------------
-# 탭 11: 자동 pptx 리포트 (주소 하나로 실제 데이터를 채운 부동산 분석 리포트 생성)
+# 탭 11: 유동인구 (서울 열린데이터광장 행정동 단위 서울생활인구(내국인) Open API)
+# ------------------------------------------------------------------
+with tab_flpop:
+    st.write(
+        "**서울 열린데이터광장 '행정동 단위 서울생활인구(내국인)'** 데이터로 특정 행정동의 "
+        "시간대별 유동인구(생활인구) 추이를 조회합니다."
+    )
+    st.warning(
+        "⚠️ 이 데이터셋은 국토부 API가 쓰는 법정동코드가 아니라 **통계청 기준 행정동코드**를 씁니다 "
+        "— 아직 이 프로젝트에 법정동↔행정동 매핑표가 없어 행정동코드를 직접 입력해야 합니다. "
+        "정확한 서비스명·필드명도 아직 실제 응답으로 검증되지 않았습니다 — 조회 시 오류가 나거나 "
+        "차트가 비어 있으면(아래 원본 표는 항상 표시됩니다) 알려주시면 바로 고치겠습니다."
+    )
+    if not seoul_key:
+        st.warning("사이드바에 서울 열린데이터광장 인증키를 입력해야 사용할 수 있습니다.")
+    else:
+        col_code, col_date = st.columns(2)
+        flpop_adstrd = col_code.text_input(
+            "행정동코드 (통계청 기준)", value="", placeholder="예: 11215547", key="flpop_adstrd",
+            help="국토부 법정동코드와는 다른 체계입니다. 서울 열린데이터광장의 행정동코드 참고자료에서 확인하세요.",
+        )
+        flpop_default_date = datetime.date.today() - datetime.timedelta(days=5)
+        flpop_date = col_date.date_input(
+            "기준일자", value=flpop_default_date,
+            max_value=datetime.date.today() - datetime.timedelta(days=1),
+            min_value=datetime.date.today() - datetime.timedelta(days=60),
+            key="flpop_date",
+            help="이 데이터셋은 최근 데이터만 제공합니다(수 일~약 2개월 이내). 너무 최근이면 비어있을 수 있습니다.",
+        )
+
+        if st.button("유동인구 조회", type="primary", key="flpop_submit"):
+            if not flpop_adstrd.strip():
+                st.warning("행정동코드를 입력해주세요.")
+            else:
+                try:
+                    with st.spinner("서울 생활인구 데이터 조회 중..."):
+                        flpop_date_str = flpop_date.strftime("%Y%m%d")
+                        flpop_df = get_seoul_living_population(seoul_key, flpop_date_str, flpop_adstrd.strip())
+                    st.session_state.flpop_result = (flpop_adstrd.strip(), flpop_date_str, flpop_df)
+                except Exception as e:
+                    st.error(f"조회 실패: {e}")
+                    st.session_state.flpop_result = None
+
+        flpop_result = st.session_state.get("flpop_result")
+        if flpop_result is None:
+            st.info("행정동코드와 기준일자를 입력하고 **유동인구 조회**를 눌러주세요.")
+        else:
+            used_code, used_date, flpop_df = flpop_result
+            if flpop_df is None or flpop_df.empty:
+                st.info(f"행정동코드 '{used_code}'의 {used_date} 데이터가 없습니다. 코드나 날짜를 확인해주세요.")
+            else:
+                st.success(f"행정동코드 '{used_code}' · 기준일자 {used_date} · {len(flpop_df)}건 조회됨")
+                flpop_analysis = analyze_seoul_living_population(flpop_df)
+                if flpop_analysis["trend"]:
+                    st.subheader("⏱️ 시간대별 총 생활인구")
+                    trend_df = pd.DataFrame(flpop_analysis["trend"]).set_index("label")
+                    st.line_chart(trend_df["value"])
+                    st.caption(
+                        f"감지된 컬럼 — 총생활인구: `{flpop_analysis['total_col']}` · "
+                        f"시간대: `{flpop_analysis['time_col']}`"
+                    )
+                else:
+                    st.info(
+                        "총생활인구·시간대로 보이는 컬럼을 자동으로 찾지 못했습니다 — "
+                        "아래 원본 표에서 실제 컬럼명을 확인해주세요."
+                    )
+
+                st.subheader("📋 원본 응답")
+                st.dataframe(flpop_df, width='stretch')
+                flpop_csv = flpop_df.to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "📄 CSV 다운로드", flpop_csv, "seoul_living_population.csv", "text/csv",
+                    key="flpop_csv",
+                )
+
+# ------------------------------------------------------------------
+# 탭 12: 자동 pptx 리포트 (주소 하나로 실제 데이터를 채운 부동산 분석 리포트 생성)
 # ------------------------------------------------------------------
 with tab_autopptx:
     st.write(

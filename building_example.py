@@ -1555,6 +1555,67 @@ def _seoul_fetch_all(seoul_key: str, service: str, extra_path: str = None, max_r
     return pd.DataFrame(all_rows)
 
 
+# 행정동 단위 서울생활인구(내국인) — data.seoul.go.kr 데이터셋 OA-14991.
+# 서비스명은 데이터셋 페이지에서 검색으로 확인한 것으로(자바스크립트로 렌더링되는
+# "Open API" 탭을 이번 세션에서 직접 열어보지는 못했다), 실제 응답으로 아직
+# 검증되지 않았다 — 필드명도 마찬가지라 analyze_seoul_living_population()이
+# 정확한 컬럼명을 정규식으로 유연하게 찾도록 만들어 뒀다. 첫 호출에서 오류가
+# 나거나 컬럼이 예상과 다르면 이 서비스명/필드명부터 의심할 것.
+#
+# 이 데이터셋의 "행정동코드"는 국토부 건축HUB/실거래가 API가 쓰는 법정동코드와
+# 다른 통계청 체계다 — 같은 "이태원동"이라도 코드가 다르다. 이 프로젝트에는
+# 아직 법정동<->행정동 매핑표가 없어서, 호출부(대시보드)는 사용자가 행정동코드를
+# 직접 입력하게 한다.
+SEOUL_LIVING_POP_DONG_SERVICE = "SPOP_LOCAL_RESD_DONG"
+
+
+def get_seoul_living_population(seoul_key: str, date_str: str, adstrd_code: str = None) -> pd.DataFrame:
+    """행정동 단위 서울생활인구(내국인) 특정 날짜(YYYYMMDD) 데이터를 가져온다.
+
+    서버가 행정동 단위 필터 파라미터를 지원하는지 불확실해서, 안전하게 그 날짜의
+    서울 전체 데이터를 받아 adstrd_code가 있으면 로컬에서 거른다 — 우리마을가게
+    상권분석(도시 전체를 받아 상권코드로 거르는 방식)과 같은 전략이다.
+    """
+    df = _seoul_fetch_all(seoul_key, SEOUL_LIVING_POP_DONG_SERVICE, extra_path=date_str)
+    if df.empty or not adstrd_code:
+        return df
+    code_col = next((c for c in df.columns if re.search(r"ADSTRD|행정동.?코드|DONG.?CD", c, re.I)), None)
+    if not code_col:
+        return df
+    return df[df[code_col].astype(str).str.strip() == str(adstrd_code).strip()].reset_index(drop=True)
+
+
+def analyze_seoul_living_population(df: pd.DataFrame) -> dict:
+    """행정동 단위 서울생활인구(내국인) 원본 응답에서 시간대별 총 생활인구 추이를 뽑는다.
+
+    정확한 컬럼명이 실제 응답으로 검증되지 않았으므로, "총" + "생활인구"류 이름과
+    "시간대"류 이름을 정규식으로 유연하게 찾는다 — 못 찾으면 조용히 빈 결과를
+    돌려주고, 호출부(대시보드)가 원본 표를 항상 함께 보여줘서 실제 컬럼명을 바로
+    확인할 수 있게 한다.
+    """
+    result = {"trend": [], "total_col": None, "time_col": None}
+    if df is None or df.empty:
+        return result
+
+    cols = list(df.columns)
+    total_col = next((c for c in cols if re.search(r"TOT.*LVPOP|LVPOP.*TOT|총.*생활\s*인구", c, re.I)), None)
+    time_col = next((c for c in cols if re.search(r"TMZON|TIME.*(SE|CD)|시간\s*대", c, re.I)), None)
+    result["total_col"], result["time_col"] = total_col, time_col
+
+    if total_col and time_col:
+        d = df[[time_col, total_col]].copy()
+        d[total_col] = pd.to_numeric(d[total_col], errors="coerce")
+        d = d.dropna(subset=[total_col])
+        grouped = d.groupby(time_col)[total_col].sum()
+        try:
+            grouped = grouped.sort_index(key=lambda idx: pd.to_numeric(idx, errors="coerce"))
+        except TypeError:
+            grouped = grouped.sort_index()
+        result["trend"] = [{"label": str(t), "value": float(v)} for t, v in grouped.items()]
+
+    return result
+
+
 def seoul_current_quarter_id(today: datetime.date = None) -> str:
     """오늘 날짜 기준 서울 상권분석서비스 분기 코드(예: 2026년 1분기 -> "20261")를 계산.
 
