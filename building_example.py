@@ -1616,6 +1616,26 @@ def analyze_seoul_living_population(df: pd.DataFrame) -> dict:
     return result
 
 
+_SEOUL_ADSTRD_CODES_PATH = os.path.join(os.path.dirname(__file__), "seoul_adstrd_codes.csv")
+
+
+@functools.lru_cache(maxsize=1)
+def load_seoul_adstrd_codes() -> pd.DataFrame:
+    """서울시 행정동코드(구/행정동/행정동코드) 참조표를 불러온다.
+
+    통계지리정보서비스(SGIS)가 배포하는 "행정구역 코드" 참조 파일(2025년 6월 기준)의
+    서울특별시 구간만 추려 오프라인 CSV로 미리 만들어 둔 것이다 — 시도코드(2자리)+
+    시군구코드(3자리, SGIS 자체 번호 체계로 국토부 법정동 시군구코드와는 다름)+
+    읍면동코드(3자리)를 이어붙인 8자리가 이 프로젝트에서 쓰는 "행정동코드"다.
+
+    법정동과 행정동은 이름이 같아도 코드 체계가 다르고 심지어 갈라지기도 한다
+    (예: 법정동 "이태원동" 하나가 행정동으로는 "이태원1동"(11030650)·"이태원2동"
+    (11030660) 둘로 나뉜다) — 이 표가 없으면 국토부 법정동코드로 생활인구 API를
+    바로 조회할 수 없다.
+    """
+    return pd.read_csv(_SEOUL_ADSTRD_CODES_PATH, encoding="utf-8-sig", dtype=str)
+
+
 def seoul_current_quarter_id(today: datetime.date = None) -> str:
     """오늘 날짜 기준 서울 상권분석서비스 분기 코드(예: 2026년 1분기 -> "20261")를 계산.
 

@@ -53,6 +53,7 @@ from building_example import (
     SEOUL_TRDAR_WRC_POPLTN_SERVICE,
     get_seoul_living_population,
     analyze_seoul_living_population,
+    load_seoul_adstrd_codes,
     reverse_match_transactions,
     split_common_and_varying,
 )
@@ -1599,19 +1600,30 @@ with tab_flpop:
         "시간대별 유동인구(생활인구) 추이를 조회합니다."
     )
     st.warning(
-        "⚠️ 이 데이터셋은 국토부 API가 쓰는 법정동코드가 아니라 **통계청 기준 행정동코드**를 씁니다 "
-        "— 아직 이 프로젝트에 법정동↔행정동 매핑표가 없어 행정동코드를 직접 입력해야 합니다. "
-        "정확한 서비스명·필드명도 아직 실제 응답으로 검증되지 않았습니다 — 조회 시 오류가 나거나 "
+        "⚠️ 정확한 서비스명·필드명은 아직 실제 응답으로 검증되지 않았습니다 — 조회 시 오류가 나거나 "
         "차트가 비어 있으면(아래 원본 표는 항상 표시됩니다) 알려주시면 바로 고치겠습니다."
     )
     if not seoul_key:
         st.warning("사이드바에 서울 열린데이터광장 인증키를 입력해야 사용할 수 있습니다.")
     else:
-        col_code, col_date = st.columns(2)
-        flpop_adstrd = col_code.text_input(
-            "행정동코드 (통계청 기준)", value="", placeholder="예: 11215547", key="flpop_adstrd",
-            help="국토부 법정동코드와는 다른 체계입니다. 서울 열린데이터광장의 행정동코드 참고자료에서 확인하세요.",
+        _flpop_adstrd_df = load_seoul_adstrd_codes()
+        _flpop_gu_options = sorted(_flpop_adstrd_df["구"].unique())
+        col_gu, col_dong, col_date = st.columns(3)
+        flpop_gu = col_gu.selectbox(
+            "구", _flpop_gu_options,
+            index=_flpop_gu_options.index(addr_gu) if addr_gu in _flpop_gu_options else 0,
+            key="flpop_gu",
         )
+        _flpop_dong_options = _flpop_adstrd_df.loc[_flpop_adstrd_df["구"] == flpop_gu, "행정동"].tolist()
+        flpop_dong = col_dong.selectbox("행정동", _flpop_dong_options, key="flpop_dong")
+        flpop_adstrd_code = _flpop_adstrd_df.loc[
+            (_flpop_adstrd_df["구"] == flpop_gu) & (_flpop_adstrd_df["행정동"] == flpop_dong), "행정동코드",
+        ].iloc[0]
+        st.caption(
+            f"행정동코드: `{flpop_adstrd_code}` (SGIS 통계지리정보서비스 2025년 6월 기준 — "
+            "법정동과 이름이 같아도 코드 체계가 다르고, 갈라져 있을 수 있습니다)"
+        )
+
         flpop_default_date = datetime.date.today() - datetime.timedelta(days=5)
         flpop_date = col_date.date_input(
             "기준일자", value=flpop_default_date,
@@ -1622,27 +1634,24 @@ with tab_flpop:
         )
 
         if st.button("유동인구 조회", type="primary", key="flpop_submit"):
-            if not flpop_adstrd.strip():
-                st.warning("행정동코드를 입력해주세요.")
-            else:
-                try:
-                    with st.spinner("서울 생활인구 데이터 조회 중..."):
-                        flpop_date_str = flpop_date.strftime("%Y%m%d")
-                        flpop_df = get_seoul_living_population(seoul_key, flpop_date_str, flpop_adstrd.strip())
-                    st.session_state.flpop_result = (flpop_adstrd.strip(), flpop_date_str, flpop_df)
-                except Exception as e:
-                    st.error(f"조회 실패: {e}")
-                    st.session_state.flpop_result = None
+            try:
+                with st.spinner("서울 생활인구 데이터 조회 중..."):
+                    flpop_date_str = flpop_date.strftime("%Y%m%d")
+                    flpop_df = get_seoul_living_population(seoul_key, flpop_date_str, flpop_adstrd_code)
+                st.session_state.flpop_result = (f"{flpop_gu} {flpop_dong}", flpop_adstrd_code, flpop_date_str, flpop_df)
+            except Exception as e:
+                st.error(f"조회 실패: {e}")
+                st.session_state.flpop_result = None
 
         flpop_result = st.session_state.get("flpop_result")
         if flpop_result is None:
-            st.info("행정동코드와 기준일자를 입력하고 **유동인구 조회**를 눌러주세요.")
+            st.info("구·행정동·기준일자를 고르고 **유동인구 조회**를 눌러주세요.")
         else:
-            used_code, used_date, flpop_df = flpop_result
+            used_label, used_code, used_date, flpop_df = flpop_result
             if flpop_df is None or flpop_df.empty:
-                st.info(f"행정동코드 '{used_code}'의 {used_date} 데이터가 없습니다. 코드나 날짜를 확인해주세요.")
+                st.info(f"'{used_label}'({used_code})의 {used_date} 데이터가 없습니다. 행정동이나 날짜를 바꿔보세요.")
             else:
-                st.success(f"행정동코드 '{used_code}' · 기준일자 {used_date} · {len(flpop_df)}건 조회됨")
+                st.success(f"'{used_label}' (행정동코드 {used_code}) · 기준일자 {used_date} · {len(flpop_df)}건 조회됨")
                 flpop_analysis = analyze_seoul_living_population(flpop_df)
                 if flpop_analysis["trend"]:
                     st.subheader("⏱️ 시간대별 총 생활인구")
