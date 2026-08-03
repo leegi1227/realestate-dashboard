@@ -616,9 +616,15 @@ with tab_report:
                 status.write("완료!")
 
                 st.session_state.report = report
+                # 자동 pptx 리포트 탭이 "같은 번지로 조회된 결과인지" 확인할 수 있게
+                # 조회에 실제로 쓰인 조건을 함께 저장해둔다.
+                st.session_state.report_address_key = (
+                    sigungu_code, bdong_code, bun or None, ji if ji and ji != "0" else None,
+                )
             except Exception as e:
                 st.error(f"리포트 생성 실패: {e}")
                 st.session_state.report = None
+                st.session_state.report_address_key = None
 
     report = st.session_state.get("report")
     if not report:
@@ -1664,9 +1670,10 @@ with tab_autopptx:
         "(서울 소재 시) 서울 상권분석까지, 실제로 조회한 데이터로 슬라이드를 채웁니다."
     )
     st.caption(
-        "💡 **동단위 통계 · 노후건축물 · 공시가격 시계열(동단위 공시가격 분석) · 서울 상권분석** 탭을 "
-        "이 리포트보다 먼저 조회해두면, 그 탭이 채워둔 캐시를 그대로 재사용해 해당 부분 조회 시간이 "
-        "크게 줄어듭니다 (탭을 안 열어봤다면 리포트가 알아서 새로 조회하니 그냥 눌러도 됩니다)."
+        "💡 **종합 리포트(같은 번지) · 동단위 통계 · 노후건축물 · 공시가격 시계열(동단위 공시가격 분석) · "
+        "서울 상권분석** 탭을 이 리포트보다 먼저 조회해두면, 그 탭이 채워둔 결과/캐시를 그대로 재사용해 "
+        "해당 부분 조회 시간이 크게 줄어듭니다 (탭을 안 열어봤다면 리포트가 알아서 새로 조회하니 그냥 "
+        "눌러도 됩니다)."
     )
     if st.session_state.get("ledger_docs"):
         st.caption(
@@ -1708,6 +1715,15 @@ with tab_autopptx:
                 def _on_report_progress(msg):
                     progress_box.info(msg)
 
+                # "종합 리포트" 탭이 정확히 같은 번지(sigungu_code/bdong_code/bun/ji)로
+                # 이미 조회해둔 결과가 있으면 표제부·주택가격·지역지구구역 재조회를 건너뛴다.
+                current_address_key = (
+                    sigungu_code, bdong_code, bun or None, ji if ji and ji != "0" else None,
+                )
+                reusable_report = None
+                if st.session_state.get("report_address_key") == current_address_key:
+                    reusable_report = st.session_state.get("report")
+
                 with st.spinner("리포트 데이터 수집 중... (최초 조회 시 1~2분 정도 걸릴 수 있습니다)"):
                     report_data = fetch_report_data(
                         service_key=service_key,
@@ -1730,6 +1746,7 @@ with tab_autopptx:
                         district_price_loader=_load_district_prices,
                         seoul_locations_loader=_load_seoul_trade_area_locations,
                         seoul_quarter_loader=_load_seoul_quarter_dataset,
+                        single_report=reusable_report,
                     )
                 progress_box.empty()
 

@@ -231,6 +231,25 @@ def _stat_card(slide, x, y, w, h, value, label, sub=None):
         _textbox(slide, x + 0.15, y + h * 0.76, w - 0.3, h * 0.2, sub, size=9, color=MUTED)
 
 
+def _key_point_box(slide, text, x=0.6, y=6.15, w=12.1, h=0.75):
+    """참고 리포트(연남동 상권분석)의 시그니처 'KEY POINT' 콜아웃 — 그 슬라이드에서 데이터가
+    말해주는 한 줄 통찰을 짙은 네이비 박스 + 테라코타 라벨로 눈에 띄게 강조한다. 각 분석
+    슬라이드가 이미 계산해 둔 note/insight 문장을 그대로 여기 태워서 쓴다(새 계산 없음)."""
+    box = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, _sx(x), _sy(y), _sx(w), _sy(h))
+    box.adjustments[0] = 0.14
+    box.fill.solid()
+    box.fill.fore_color.rgb = NAVY
+    box.line.fill.background()
+    box.shadow.inherit = False
+    box.text_frame.paragraphs[0].text = ""
+
+    badge_w = 1.35
+    _textbox(slide, x + 0.3, y, badge_w, h, "KEY POINT", size=10, bold=True,
+             color=TERRACOTTA, valign=MSO_ANCHOR.MIDDLE)
+    _textbox(slide, x + 0.3 + badge_w, y + 0.08, w - badge_w - 0.6, h - 0.16, text,
+             size=12, color=WHITE, valign=MSO_ANCHOR.MIDDLE, line_spacing=1.2)
+
+
 def _table(slide, x, y, w, h, headers, rows, col_ratios=None, font_size=11):
     n_rows, n_cols = len(rows) + 1, len(headers)
     gframe = slide.shapes.add_table(n_rows, n_cols, _sx(x), _sy(y), _sx(w), _sy(h))
@@ -568,10 +587,50 @@ def _transactions_slide(prs, data):
         _textbox(slide, 6.6, 1.3, 6.1, 0.35, "거래가 추이", size=13, bold=True, color=NAVY)
         _line_chart(slide, 6.6, 1.7, 6.1, 2.7, [t["label"] for t in tx["trend"]], [t["value"] for t in tx["trend"]], TERRACOTTA)
 
-    if tx.get("note"):
-        _card(slide, 0.6, 4.6, 12.1, 1.3)
-        _textbox(slide, 0.9, 4.6, 11.5, 1.3, tx["note"], size=13, valign=MSO_ANCHOR.MIDDLE)
+    if tx.get("insight") or tx.get("note"):
+        _key_point_box(slide, tx.get("insight") or tx["note"])
     _page_footer(slide, data["address"], "실거래가 동향")
+
+
+def _land_vs_floor_price_slide(prs, data):
+    """참고 리포트(연남동 상권분석) '대지기준 vs 연면적기준 평당가 비교' 슬라이드와 같은 방식.
+
+    반경 200m 실거래 매칭 결과 중 대지면적·연면적이 모두 확인되는 거래만 골라, 같은 거래를
+    두 단위로 환산해 토지가치·건물가치 관점을 분리해 보여준다. 새 API 호출 없이 실거래가
+    동향 슬라이드와 같은 데이터를 재계산만 한다(_build_transactions의 land_vs_floor)."""
+    rows = [r for r in (data.get("transactions") or {}).get("land_vs_floor") or []
+            if r["land_price"] is not None and r["floor_price"] is not None]
+    if not rows:
+        return
+    slide = _new_slide(prs)
+    _section_title(slide, "대지기준 vs 연면적기준 평당가 비교")
+    _textbox(slide, 0.6, 1.05, 11.5, 0.3,
+             "같은 거래를 두 가지 단위로 환산 — 토지가치와 건물가치의 분리 관점 (반경 200m 이내 매칭 거래)",
+             size=11, color=MUTED)
+
+    def _price_label(v):
+        return f"{v / 1e4:,.2f}억" if v >= 1e4 else f"{v:,.0f}만원"
+
+    table_rows = [
+        [r["지번"], f"{r['far']}%" if r["far"] is not None else "-",
+         _price_label(r["land_price"]), _price_label(r["floor_price"])]
+        for r in rows
+    ]
+    _table(slide, 0.6, 1.55, 12.1, min(4.6, 0.45 * (len(table_rows) + 1)),
+           ["지번", "용적률", "토지평당가", "건물평당가"], table_rows, col_ratios=[2.4, 1.3, 1.8, 1.8])
+
+    scored = [(r, r["floor_price"] / r["land_price"]) for r in rows if r["land_price"]]
+    if scored:
+        top_r, ratio = max(scored, key=lambda t: abs(t[1] - 1))
+        far_label = f"용적률 {top_r['far']}%" if top_r["far"] is not None else "용적률 정보 없음"
+        if ratio > 1:
+            insight = (f"{top_r['지번']}는 연면적기준가가 대지기준가의 {ratio:.1f}배로, "
+                       f"저층·저용적({far_label}) 필지일수록 토지가치 중심 거래로 보입니다.")
+        else:
+            insight = (f"{top_r['지번']}는 연면적기준가가 대지기준가의 {ratio * 100:.0f}%에 불과해, "
+                       f"고용적률({far_label}) 필지는 넓은 연면적이 단위가격을 희석시키는 경향을 보입니다.")
+        _key_point_box(slide, insight, y=6.25, h=0.7)
+    _page_footer(slide, data["address"], "대지 vs 연면적 평당가 비교")
 
 
 def _district_slide(prs, data):
@@ -581,15 +640,14 @@ def _district_slide(prs, data):
     slide = _new_slide(prs)
     _section_title(slide, f"동단위 시장 통계 — {data['location'].get('adong_name') or ''}")
     _textbox(slide, 0.6, 1.3, 8, 0.35, "준공연도대별 건물 수 분포 (동 전체)", size=13, bold=True, color=NAVY)
-    _bar_chart(slide, 0.6, 1.7, 8.0, 4.6,
+    _bar_chart(slide, 0.6, 1.7, 8.0, 4.3,
                [b["label"] for b in dist["age_buckets"]], [b["value"] for b in dist["age_buckets"]], NAVY_LIGHT)
 
     rx, rw = 9.0, 3.7
     if dist.get("callout"):
-        _stat_card(slide, rx, 1.7, rw, 1.6, dist["callout"]["value"], dist["callout"]["label"], dist["callout"].get("sub"))
+        _stat_card(slide, rx, 1.7, rw, 2.2, dist["callout"]["value"], dist["callout"]["label"], dist["callout"].get("sub"))
     if dist.get("note"):
-        _card(slide, rx, 3.5, rw, 2.8)
-        _textbox(slide, rx + 0.25, 3.7, rw - 0.5, 2.4, dist["note"], size=12, line_spacing=1.3)
+        _key_point_box(slide, dist["note"])
     _page_footer(slide, data["address"], "동단위 시장 통계")
 
 
@@ -618,7 +676,7 @@ def _price_history_slide(prs, data):
     slide = _new_slide(prs)
     _section_title(slide, "공시가격 시계열")
     _textbox(slide, 0.6, 1.3, 7.4, 0.35, "연도별 공시가격 추이", size=13, bold=True, color=NAVY)
-    _line_chart(slide, 0.6, 1.7, 7.4, 4.6, [t["label"] for t in ph["trend"]], [t["value"] for t in ph["trend"]], TERRACOTTA)
+    _line_chart(slide, 0.6, 1.7, 7.4, 4.2, [t["label"] for t in ph["trend"]], [t["value"] for t in ph["trend"]], TERRACOTTA)
 
     if ph.get("rows"):
         _textbox(slide, 8.3, 1.3, 4.4, 0.35, "연도별 변동률", size=13, bold=True, color=NAVY)
@@ -635,12 +693,9 @@ def _price_history_slide(prs, data):
             cards.append(("대상물건 위치", f"상위 {district['상위백분율']:.0f}%"))
         cw, gap = (4.4 - 0.15 * (len(cards) - 1)) / len(cards), 0.15
         for i, (label, val) in enumerate(cards):
-            _stat_card(slide, 8.3 + i * (cw + gap), 4.25, cw, 1.05, val, label)
+            _stat_card(slide, 8.3 + i * (cw + gap), 4.25, cw, 1.6, val, label)
     if ph.get("note"):
-        note_y = 5.5 if district else 4.1
-        note_h = max(0.9, 6.9 - note_y)
-        _card(slide, 8.3, note_y, 4.4, note_h)
-        _textbox(slide, 8.55, note_y, 3.9, note_h, ph["note"], size=10.5, valign=MSO_ANCHOR.MIDDLE, line_spacing=1.25)
+        _key_point_box(slide, ph["note"], y=6.05, h=0.85)
     _page_footer(slide, data["address"], "공시가격 시계열")
 
 
@@ -655,20 +710,22 @@ def _commercial_slide(prs, data):
 
     if com.get("vacancy_trend"):
         _textbox(slide, 0.6, 1.3, 6.0, 0.35, f"공실률 추이 ({com.get('vacancy_label', '')})", size=13, bold=True, color=NAVY)
-        _line_chart(slide, 0.6, 1.7, 6.0, 4.6,
+        _line_chart(slide, 0.6, 1.7, 6.0, 4.2,
                     [t["label"] for t in com["vacancy_trend"]], [t["value"] for t in com["vacancy_trend"]], NAVY_LIGHT)
     else:
-        _card(slide, 0.6, 1.7, 6.0, 4.6)
-        _textbox(slide, 0.6, 3.7, 6.0, 0.6, "해당 지역 공실률 데이터를 찾지 못했습니다.",
+        _card(slide, 0.6, 1.7, 6.0, 4.2)
+        _textbox(slide, 0.6, 3.5, 6.0, 0.6, "해당 지역 공실률 데이터를 찾지 못했습니다.",
                  size=12, color=MUTED, align=PP_ALIGN.CENTER)
 
     if com.get("top_industries"):
         industry_label = "업종 Top 5 (점포 수, 서울 열린데이터광장)" if area_name else "반경 500m 업종 Top 5 (점포 수)"
         _textbox(slide, 6.9, 1.3, 5.8, 0.35, industry_label, size=13, bold=True, color=NAVY)
-        chart = _bar_chart(slide, 6.9, 1.7, 5.8, 4.6,
+        chart = _bar_chart(slide, 6.9, 1.7, 5.8, 4.2,
                             [t["label"] for t in com["top_industries"]], [t["value"] for t in com["top_industries"]],
                             TERRACOTTA, horizontal=True)
         _gradient_fill(chart.plots[0].series[0].format, angle=0)
+    if com.get("insight"):
+        _key_point_box(slide, com["insight"], y=6.05, h=0.85)
     _page_footer(slide, data["address"], "상권 개황")
 
 
@@ -723,13 +780,15 @@ def _seoul_detail_slide(prs, data):
 
     if sd.get("top_industries"):
         _textbox(slide, 0.6, 2.85, 5.6, 0.35, "업종별 매출 · 점포수 Top 5", size=13, bold=True, color=NAVY)
-        _table(slide, 0.6, 3.25, 5.6, 3.0, ["업종", "당월 매출", "점포수"], sd["top_industries"], col_ratios=[3.0, 2.0, 1.6])
+        _table(slide, 0.6, 3.25, 5.6, 2.85, ["업종", "당월 매출", "점포수"], sd["top_industries"], col_ratios=[3.0, 2.0, 1.6])
 
     if sd.get("weekday"):
         _textbox(slide, 6.6, 2.85, 6.1, 0.35, "요일별 매출 (억원)", size=13, bold=True, color=NAVY)
-        chart = _bar_chart(slide, 6.6, 3.25, 6.1, 3.0, [d["label"] for d in sd["weekday"]], [d["value"] for d in sd["weekday"]],
+        chart = _bar_chart(slide, 6.6, 3.25, 6.1, 2.85, [d["label"] for d in sd["weekday"]], [d["value"] for d in sd["weekday"]],
                             TERRACOTTA, num_fmt="0.0")
         _gradient_fill(chart.plots[0].series[0].format, angle=0)
+    if sd.get("insights"):
+        _key_point_box(slide, sd["insights"][0], y=6.25, h=0.7)
     _page_footer(slide, data["address"], "서울 상권 상세")
 
 
@@ -793,6 +852,50 @@ def _seoul_detail_slide2(prs, data):
             _textbox(slide, 6.6, y, 6.1, 0.5, f"• {line}", size=11, color=TEXT_DARK, line_spacing=1.2)
             y += 0.5
     _page_footer(slide, data["address"], "서울 상권 상세")
+
+
+def _seoul_population_slide(prs, data):
+    """서울 열린데이터광장 우리마을가게 상권분석서비스의 생활인구(유동인구)·직장인구를
+
+    성별·연령대별로 시각화한다. 상권 매출/업종 데이터와 같은 API 호출(_build_seoul)에서
+    이미 받아오는 값인데 지금까지 슬라이드에 안 쓰이고 있었다 — 새 API 호출 없이 기존
+    데이터를 그대로 채워 넣는다."""
+    sd = data.get("seoul_trade_area")
+    if not sd or not (sd.get("flpop") or sd.get("wrc")):
+        return
+    slide = _new_slide(prs)
+    _section_title(slide, f"유동인구(생활인구) · 직장인구 분석 — {sd.get('name', '')}")
+    _textbox(slide, 0.6, 1.05, 11.5, 0.3,
+             "※ 서울 열린데이터광장 우리마을가게 상권분석서비스 기준, 해당 상권 전체 분기 추정치입니다.",
+             size=10, italic=True, color=MUTED)
+
+    flpop = sd.get("flpop") or {}
+    wrc = sd.get("wrc") or {}
+    col_w, gap = 5.75, 0.6
+    cols = [
+        (0.6, "유동인구 (생활인구)", flpop, sd.get("flpop_age") or [], "총생활인구"),
+        (0.6 + col_w + gap, "직장인구", wrc, sd.get("wrc_age") or [], "총직장인구"),
+    ]
+    for x, label, pop_stats, age_chart, total_key in cols:
+        _textbox(slide, x, 1.55, col_w, 0.35, label, size=14, bold=True, color=NAVY)
+        y = 2.0
+        total = pop_stats.get(total_key)
+        if total is not None:
+            male = pop_stats.get("남성비율(%)")
+            female = pop_stats.get("여성비율(%)")
+            sub = f"남성 {male:.0f}% · 여성 {female:.0f}%" if male is not None and female is not None else None
+            _stat_card(slide, x, y, col_w, 1.2, f"{total:,.0f}명", "분기 추정 인구", sub)
+            y += 1.4
+        if age_chart:
+            _textbox(slide, x, y, col_w, 0.3, "연령대별 인구", size=12, bold=True, color=NAVY)
+            chart = _bar_chart(slide, x, y + 0.35, col_w, 2.9,
+                                [a["label"] for a in age_chart], [a["value"] for a in age_chart],
+                                NAVY_LIGHT if "생활" in label else TERRACOTTA, num_fmt="#,##0")
+            _gradient_fill(chart.plots[0].series[0].format, angle=0)
+        elif total is None:
+            _card(slide, x, y, col_w, 2.0)
+            _textbox(slide, x, y + 0.85, col_w, 0.4, "데이터 없음", size=12, color=MUTED, align=PP_ALIGN.CENTER)
+    _page_footer(slide, data["address"], "유동인구 · 직장인구 분석")
 
 
 def _growth_drivers_slide(prs, data):
@@ -984,6 +1087,10 @@ def _slide_plan(data):
         (1, "입지 · 상권 개관", _intro_divider_slide),
         (1, "위치 및 입지", _location_slide),
         (2, "실거래가 동향", _transactions_slide) if data.get("transactions", {}).get("rows") else None,
+        (2, "대지기준 vs 연면적기준 평당가 비교", _land_vs_floor_price_slide)
+        if any(r["land_price"] is not None and r["floor_price"] is not None
+               for r in data.get("transactions", {}).get("land_vs_floor") or [])
+        else None,
         (2, "동단위 시장 통계 — 연대별", _district_slide) if dist.get("age_buckets") else None,
         (2, "동단위 시장 통계 — 주용도별", _district_mix_slide) if dist.get("mix") else None,
         (2, "공시가격 시계열", _price_history_slide) if data.get("price_history", {}).get("trend") else None,
@@ -993,6 +1100,9 @@ def _slide_plan(data):
         (2, "서울 상권 상세", _seoul_detail_slide) if data.get("seoul_trade_area") else None,
         (2, "서울 상권 상세 — 소비자 특성", _seoul_detail_slide2)
         if (data.get("seoul_trade_area") or {}).get("insights") or (data.get("seoul_trade_area") or {}).get("age")
+        else None,
+        (2, "유동인구 · 직장인구 분석", _seoul_population_slide)
+        if (data.get("seoul_trade_area") or {}).get("flpop") or (data.get("seoul_trade_area") or {}).get("wrc")
         else None,
         (3, "개발호재 종합", _growth_drivers_slide) if data.get("growth_drivers") else None,
         (3, "SWOT 분석", _swot_slide) if any(swot.get(k) for k in ("strengths", "weaknesses", "opportunities", "threats")) else None,
@@ -1111,9 +1221,42 @@ def _format_tx_date(row):
     return "-"
 
 
+_PYEONG_M2 = 3.305785  # 1평(平) = 약 3.305785㎡
+
+
+def _land_vs_floor_price_rows(df, max_rows=8):
+    """대지면적·연면적이 둘 다 있는 매칭 거래에 한해 토지평당가·건물평당가를 계산.
+
+    같은 거래를 대지 기준/연면적 기준 두 단위로 환산해 토지가치·건물가치 관점을
+    분리해서 보여준다 — 참고 리포트(연남동 상권분석)의 "대지기준 vs 연면적기준
+    평당가 비교" 슬라이드와 같은 방식. 반경 매칭으로 이미 받아온 거래 데이터를
+    그대로 재계산할 뿐, 추가 API 호출은 없다."""
+    if df is None or df.empty:
+        return []
+    out = []
+    for _, row in df.iterrows():
+        jibun = _tx_field(row, ["지번"]) or "-"
+        price = _tx_field(row, ["거래금액", "물건금액"])
+        land = _tx_field(row, ["대지면적"])
+        floor = _tx_field(row, ["연면적"])
+        price_num = pd.to_numeric(str(price).replace(",", ""), errors="coerce") if price is not None else None
+        land_num = pd.to_numeric(land, errors="coerce") if land is not None else None
+        floor_num = pd.to_numeric(floor, errors="coerce") if floor is not None else None
+        if pd.isna(price_num) or (pd.isna(land_num) and pd.isna(floor_num)):
+            continue
+        land_price = float(price_num) / (float(land_num) / _PYEONG_M2) if land_num and land_num > 0 else None
+        floor_price = float(price_num) / (float(floor_num) / _PYEONG_M2) if floor_num and floor_num > 0 else None
+        far = round(float(floor_num) / float(land_num) * 100) if land_num and floor_num and land_num > 0 else None
+        out.append({
+            "지번": str(jibun), "land_price": land_price, "floor_price": floor_price, "far": far,
+        })
+    out.sort(key=lambda r: r["land_price"] or 0, reverse=True)
+    return out[:max_rows]
+
+
 def _build_transactions(master, months_lookback):
     tx = master.get("실거래가") or {}
-    result = {"rows": [], "trend": [], "note": tx.get("note")}
+    result = {"rows": [], "trend": [], "note": tx.get("note"), "insight": None, "land_vs_floor": []}
     df = tx.get("df")
     if tx.get("status") != "matched" or df is None or df.empty:
         return result
@@ -1148,6 +1291,19 @@ def _build_transactions(master, months_lookback):
                 trend.append({"label": date_label, "value": round(float(price_num) / 1e4, 1)})
         result["rows"] = rows
         result["trend"] = list(reversed(trend))
+
+        if len(result["trend"]) >= 2:
+            first, last = result["trend"][0]["value"], result["trend"][-1]["value"]
+            change_pct = (last / first - 1) * 100 if first else 0
+            direction = "상승" if change_pct >= 5 else ("하락" if change_pct <= -5 else "보합")
+            result["insight"] = (
+                f"반경 200m 이내 거래가는 {result['trend'][0]['label']} {first:.1f}억에서 "
+                f"{result['trend'][-1]['label']} {last:.1f}억으로 {direction} 흐름입니다 ({change_pct:+.1f}%)."
+            )
+        elif result["rows"]:
+            result["insight"] = f"반경 200m 이내 최근 {months_lookback}개월간 {len(result['rows'])}건의 거래가 확인됩니다."
+
+        result["land_vs_floor"] = _land_vs_floor_price_rows(df)
     except Exception:
         pass
     return result
@@ -1325,6 +1481,16 @@ def _build_commercial(reb_key, sangkwon_key, dong_name, lon, lat, seoul_detail=N
                 result["store_list_cols"] = ["상호명", "업종", "주소", "거리"]
         except Exception as e:
             result["notes"].append(f"주변 업종: 조회 오류 ({e})")
+
+    result["insight"] = None
+    vt = result["vacancy_trend"]
+    if vt and len(vt) >= 2:
+        first, last = vt[0]["value"], vt[-1]["value"]
+        trend_word = "안정적으로 유지되고" if abs(last - first) <= 1.5 else ("개선되는" if last < first else "악화되는")
+        result["insight"] = f"공실률이 {vt[0]['label']} {first}%에서 {vt[-1]['label']} {last}%로 {trend_word} 흐름입니다."
+    elif result["top_industries"]:
+        top = result["top_industries"][0]
+        result["insight"] = f"업종 구성상 '{top['label']}'이(가) 가장 많은 비중({top['value']}개)을 차지합니다."
     return result
 
 
@@ -1414,11 +1580,22 @@ def _build_seoul(seoul_key, lon, lat, dong_name="", locations_loader=None, quart
         weekend_mix = detail["주중주말매출"]
         store = detail["점포"]
 
+        def _population_age_chart(pop_stats):
+            age_df = (pop_stats or {}).get("연령대별")
+            if age_df is None or age_df.empty:
+                return []
+            return [{"label": r["연령대"], "value": int(r["인구수"])} for _, r in age_df.iterrows()]
+
+        flpop = detail["생활인구"]
+        wrc_pop = detail["직장인구"]
+
         seoul_detail = {
             "name": name, "stats": stats, "top_industries": top_industries, "weekday": weekday,
             "gender": gender, "age": age, "weekend_mix": weekend_mix, "store": store,
             "insights": detail["인사이트"],
             "industry_by_count": industry_by_count, "industry_full_table": industry_full_table,
+            "flpop": flpop, "flpop_age": _population_age_chart(flpop),
+            "wrc": wrc_pop, "wrc_age": _population_age_chart(wrc_pop),
         }
         trade_area_map = {"name": name, "lat": trdar_row["lat"], "lon": trdar_row["lon"]}
         return seoul_detail, trade_area_map, None
@@ -1487,6 +1664,7 @@ def fetch_report_data(
     progress_callback=None,
     district_title_loader=None, district_price_loader=None,
     seoul_locations_loader=None, seoul_quarter_loader=None,
+    single_report=None,
 ) -> dict:
     """주소(시군구/법정동/번지) 하나에 대해 실제 데이터를 모아 generate_pptx()용 딕셔너리로 반환.
 
@@ -1494,7 +1672,12 @@ def fetch_report_data(
     대시보드의 @st.cache_data 래퍼(_load_district_titles 등)를 그대로 넘겨받기 위한 훅이다.
     사용자가 동단위통계·노후건축물·공시가격시계열·서울상권분석 탭을 이 리포트보다 먼저
     조회해뒀다면, 같은 캐시를 맞고 API 재호출 없이 즉시 재사용된다 — 안 넘기면(None) 지금처럼
-    매번 새로 조회한다."""
+    매번 새로 조회한다.
+
+    single_report는 "종합 리포트" 탭이 이미 조회해 둔 {ledger_type: DataFrame} 결과다.
+    호출부(대시보드)가 그 조회에 쓰인 sigungu_code/bdong_code/bun/ji가 지금 이 리포트와
+    정확히 같을 때만 넘겨야 한다 — build_master_report()로 그대로 전달돼 표제부·주택가격·
+    지역지구구역 재조회를 건너뛴다."""
     from PublicDataReader import BuildingLedger, TransactionPrice
 
     def _progress(msg):
@@ -1534,7 +1717,7 @@ def fetch_report_data(
         api, tp_api, sigungu_code, bdong_code, bun, ji,
         months_lookback=months_lookback, district_title_df=district_title_df,
         sido=sido, sigungu_name=sigungu_name, dong_name=dong_name,
-        vworld_key=vworld_key, kakao_key=kakao_key,
+        vworld_key=vworld_key, kakao_key=kakao_key, prefetched_ledgers=single_report,
     )
 
     data = {

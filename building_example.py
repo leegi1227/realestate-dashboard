@@ -1846,6 +1846,7 @@ def build_master_report(
     vworld_key: str = None,
     kakao_key: str = None,
     transactions_radius_m: float = 200,
+    prefetched_ledgers: dict = None,
 ) -> dict:
     """지번 하나에 대해 단일조회·실거래가·노후도·내진·공시가격(+선택적 동단위 비교)을 한 번에 모은 종합 리포트
 
@@ -1859,11 +1860,26 @@ def build_master_report(
 
     실거래가는 반경(transactions_radius_m, 기본 200m) 매칭을 쓰므로 좌표를 먼저
     확보해야 한다 — 그래서 좌표 지오코딩을 실거래가 매칭보다 앞으로 옮겼다.
+
+    prefetched_ledgers를 넘기면(대시보드 "종합 리포트" 탭이 이미 조회해 둔
+    {ledger_type: DataFrame} — 같은 sigungu_code/bdong_code/bun/ji로 조회됐을 때만
+    호출부에서 넘겨야 함) 표제부·주택가격·지역지구구역은 API 재호출 없이 그 값을
+    그대로 쓴다. 해당 종류가 없거나 조회 실패("오류" 컬럼)였으면 평소처럼 새로 조회한다.
     """
+    def _from_prefetched(ledger_type):
+        if not prefetched_ledgers:
+            return None
+        df = prefetched_ledgers.get(ledger_type)
+        if df is None or "오류" in df.columns:
+            return None
+        return df
+
     result = {}
 
-    title_df = get_building_ledger(api, ledger_type="표제부", sigungu_code=sigungu_code,
-                                    bdong_code=bdong_code, bun=bun, ji=ji)
+    title_df = _from_prefetched("표제부")
+    if title_df is None:
+        title_df = get_building_ledger(api, ledger_type="표제부", sigungu_code=sigungu_code,
+                                        bdong_code=bdong_code, bun=bun, ji=ji)
     result["표제부"] = title_df
 
     result["브이월드용도지역"] = {}
@@ -1896,16 +1912,20 @@ def build_master_report(
         result["노후도"] = pd.DataFrame()
         result["내진분석"] = {"분류별집계": pd.DataFrame(), "취약우선목록": pd.DataFrame()}
 
-    price_df = get_building_ledger(
-        api, ledger_type="주택가격", sigungu_code=sigungu_code, bdong_code=bdong_code,
-        bun=bun, ji=ji, max_rows=5000, wait_time=0.3,
-    )
+    price_df = _from_prefetched("주택가격")
+    if price_df is None:
+        price_df = get_building_ledger(
+            api, ledger_type="주택가격", sigungu_code=sigungu_code, bdong_code=bdong_code,
+            bun=bun, ji=ji, max_rows=5000, wait_time=0.3,
+        )
     result["공시가격"] = analyze_price_history(price_df, top_units=10)
 
-    zoning_df = get_building_ledger(
-        api, ledger_type="지역지구구역", sigungu_code=sigungu_code, bdong_code=bdong_code,
-        bun=bun, ji=ji,
-    )
+    zoning_df = _from_prefetched("지역지구구역")
+    if zoning_df is None:
+        zoning_df = get_building_ledger(
+            api, ledger_type="지역지구구역", sigungu_code=sigungu_code, bdong_code=bdong_code,
+            bun=bun, ji=ji,
+        )
     result["지역지구"] = summarize_zoning(zoning_df)
 
     if district_title_df is not None and not district_title_df.empty:
