@@ -1328,20 +1328,28 @@ def _build_commercial(reb_key, sangkwon_key, dong_name, lon, lat, seoul_detail=N
     return result
 
 
-def _build_seoul(seoul_key, lon, lat, dong_name=""):
+def _build_seoul(seoul_key, lon, lat, dong_name="", locations_loader=None, quarter_loader=None):
     """반환값 3번째는 실패 사유(성공 시 None) — 서울 상권분석/상권영역 지도가 왜 빠졌는지
     대시보드에 그대로 보여주기 위함.
 
     dong_name(예: "이태원동")을 넘기면 상권명에 그 동 이름이 포함된 상권을
     우선 매칭한다 — 단순 최근접만 쓰면 상권 경계가 촘촘한 지역에서 이름이
     다른 인접 상권이 뽑힐 수 있어, "상권영역이 실제 동과 다르게 나온다"는
-    혼선을 줄이기 위함이다."""
+    혼선을 줄이기 위함이다.
+
+    locations_loader/quarter_loader를 넘기면(대시보드의 _load_seoul_trade_area_locations/
+    _load_seoul_quarter_dataset — @st.cache_data로 6시간 캐시됨) 그걸 대신 쓴다. 사용자가
+    "서울 상권분석" 탭을 먼저 조회해뒀다면, 자동 리포트가 같은 데이터를 API 재호출 없이
+    캐시로 즉시 재사용하게 하기 위함이다. 안 넘기면 building_example.py의 비캐시 함수로
+    대체 동작한다."""
+    fetch_locations = locations_loader or get_seoul_trade_area_locations
+    fetch_quarter = quarter_loader or get_seoul_trade_area_quarter_dataset
     if not seoul_key:
         return None, None, "서울 열린데이터광장 인증키 미입력"
     if not lon or not lat:
         return None, None, "좌표(지오코딩) 실패로 조회 불가"
     try:
-        locations_df = get_seoul_trade_area_locations(seoul_key)
+        locations_df = fetch_locations(seoul_key)
         if locations_df is None or locations_df.empty:
             return None, None, "서울시 상권 목록 응답이 비어 있음"
         keyword = dong_name[:-1] if dong_name and dong_name.endswith("동") else dong_name
@@ -1350,10 +1358,10 @@ def _build_seoul(seoul_key, lon, lat, dong_name=""):
             return None, None, f"가장 가까운 서울시 상권이 {dist_m:.0f}m 떨어져 있어(1.5km 초과) 매칭하지 않음"
         name = trdar_row["TRDAR_CD_NM"]
 
-        selng_df, _ = get_seoul_trade_area_quarter_dataset(seoul_key, SEOUL_TRDAR_SALES_SERVICE)
-        stor_df, _ = get_seoul_trade_area_quarter_dataset(seoul_key, SEOUL_TRDAR_STORE_SERVICE)
-        flpop_df, _ = get_seoul_trade_area_quarter_dataset(seoul_key, SEOUL_TRDAR_FLPOP_SERVICE)
-        wrc_df, _ = get_seoul_trade_area_quarter_dataset(seoul_key, SEOUL_TRDAR_WRC_POPLTN_SERVICE)
+        selng_df, _ = fetch_quarter(seoul_key, SEOUL_TRDAR_SALES_SERVICE)
+        stor_df, _ = fetch_quarter(seoul_key, SEOUL_TRDAR_STORE_SERVICE)
+        flpop_df, _ = fetch_quarter(seoul_key, SEOUL_TRDAR_FLPOP_SERVICE)
+        wrc_df, _ = fetch_quarter(seoul_key, SEOUL_TRDAR_WRC_POPLTN_SERVICE)
 
         detail = analyze_seoul_trade_area_detail(trdar_row, selng_df, stor_df, flpop_df, wrc_df)
         s = detail["총괄"]
@@ -1477,8 +1485,16 @@ def fetch_report_data(
     kakao_key=None, vworld_key=None, reb_key=None, sangkwon_key=None, seoul_key=None,
     months_lookback=12, growth_drivers_text=None, swot_text=None, ledger_docs=None,
     progress_callback=None,
+    district_title_loader=None, district_price_loader=None,
+    seoul_locations_loader=None, seoul_quarter_loader=None,
 ) -> dict:
-    """주소(시군구/법정동/번지) 하나에 대해 실제 데이터를 모아 generate_pptx()용 딕셔너리로 반환."""
+    """주소(시군구/법정동/번지) 하나에 대해 실제 데이터를 모아 generate_pptx()용 딕셔너리로 반환.
+
+    district_title_loader/district_price_loader/seoul_locations_loader/seoul_quarter_loader는
+    대시보드의 @st.cache_data 래퍼(_load_district_titles 등)를 그대로 넘겨받기 위한 훅이다.
+    사용자가 동단위통계·노후건축물·공시가격시계열·서울상권분석 탭을 이 리포트보다 먼저
+    조회해뒀다면, 같은 캐시를 맞고 API 재호출 없이 즉시 재사용된다 — 안 넘기면(None) 지금처럼
+    매번 새로 조회한다."""
     from PublicDataReader import BuildingLedger, TransactionPrice
 
     def _progress(msg):
@@ -1489,21 +1505,27 @@ def fetch_report_data(
     tp_api = TransactionPrice(service_key)
     address_label = f"{sido} {sigungu_name} {dong_name}" + (f" {bun}" if bun else "") + (f"-{ji}" if ji and str(ji) != "0" else "")
 
-    _progress("동단위 표제부 조회 중...")
+    _progress("동단위 표제부 조회 중... (탭에서 미리 조회했다면 캐시로 즉시 완료)")
     try:
-        district_title_df = get_building_ledger(
-            api, ledger_type="표제부", sigungu_code=sigungu_code, bdong_code=bdong_code,
-            max_rows=10000, wait_time=0.15,
-        )
+        if district_title_loader:
+            district_title_df = district_title_loader(service_key, sigungu_code, bdong_code)
+        else:
+            district_title_df = get_building_ledger(
+                api, ledger_type="표제부", sigungu_code=sigungu_code, bdong_code=bdong_code,
+                max_rows=10000, wait_time=0.15,
+            )
     except Exception:
         district_title_df = None
 
-    _progress("동단위 공시가격 조회 중...")
+    _progress("동단위 공시가격 조회 중... (탭에서 미리 조회했다면 캐시로 즉시 완료)")
     try:
-        district_price_df = get_building_ledger(
-            api, ledger_type="주택가격", sigungu_code=sigungu_code, bdong_code=bdong_code,
-            max_rows=10000, wait_time=0.15,
-        )
+        if district_price_loader:
+            district_price_df = district_price_loader(service_key, sigungu_code, bdong_code)
+        else:
+            district_price_df = get_building_ledger(
+                api, ledger_type="주택가격", sigungu_code=sigungu_code, bdong_code=bdong_code,
+                max_rows=10000, wait_time=0.15,
+            )
     except Exception:
         district_price_df = None
 
@@ -1650,8 +1672,11 @@ def fetch_report_data(
     elif not seoul_key:
         notes.append("서울 상권분석·상권영역 지도: 서울 열린데이터광장 인증키 미입력")
     else:
-        _progress("서울 상권분석 데이터 조회 중... (최초 1회, 최대 1분 정도 걸릴 수 있습니다)")
-        seoul_detail, trade_area_map, seoul_reason = _build_seoul(seoul_key, lon, lat, dong_name=dong_name)
+        _progress("서울 상권분석 데이터 조회 중... (탭에서 미리 조회했다면 캐시로 즉시 완료, 아니면 최대 1분 정도)")
+        seoul_detail, trade_area_map, seoul_reason = _build_seoul(
+            seoul_key, lon, lat, dong_name=dong_name,
+            locations_loader=seoul_locations_loader, quarter_loader=seoul_quarter_loader,
+        )
         if seoul_reason:
             notes.append(f"서울 상권분석·상권영역 지도: {seoul_reason}")
     data["seoul_trade_area"] = seoul_detail

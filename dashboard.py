@@ -1663,10 +1663,16 @@ with tab_autopptx:
         "건축물대장 · 실거래가 · 공시가격 · 동단위 시장통계 · 상업용부동산 공실률 · 주변 상가업소 · "
         "(서울 소재 시) 서울 상권분석까지, 실제로 조회한 데이터로 슬라이드를 채웁니다."
     )
+    st.caption(
+        "💡 **동단위 통계 · 노후건축물 · 공시가격 시계열(동단위 공시가격 분석) · 서울 상권분석** 탭을 "
+        "이 리포트보다 먼저 조회해두면, 그 탭이 채워둔 캐시를 그대로 재사용해 해당 부분 조회 시간이 "
+        "크게 줄어듭니다 (탭을 안 열어봤다면 리포트가 알아서 새로 조회하니 그냥 눌러도 됩니다)."
+    )
     if st.session_state.get("ledger_docs"):
         st.caption(
-            f"📎 사이드바에 업로드한 건축물대장 열람본 {len(st.session_state['ledger_docs'])}장이 "
-            "리포트 마지막에 첨부 슬라이드로 포함되고, 위반건축물 표기가 감지되면 건축물 개요에도 반영됩니다."
+            f"📎 사이드바에 업로드한 건축물대장 열람본 {len(st.session_state['ledger_docs'])}장에서 OCR로 "
+            "소유자현황 · 변동사항을 추출해 리포트 끝에 슬라이드로 포함되고, 위반건축물 표기가 감지되면 "
+            "건축물 개요에도 반영됩니다."
         )
     st.caption(
         "※ 상권 성격 · SNS 트렌드 · 개발호재 · SWOT 같은 정성적 항목은 공공데이터로 자동 수집되지 않습니다. "
@@ -1717,6 +1723,13 @@ with tab_autopptx:
                         },
                         ledger_docs=st.session_state.get("ledger_docs"),
                         progress_callback=_on_report_progress,
+                        # 동단위통계·노후건축물·공시가격시계열·서울상권분석 탭이 쓰는 것과
+                        # 같은 @st.cache_data 래퍼를 넘긴다 — 그 탭들을 이 리포트보다 먼저
+                        # 조회해뒀다면 캐시를 맞아 API 재호출 없이 즉시 재사용된다.
+                        district_title_loader=_load_district_titles,
+                        district_price_loader=_load_district_prices,
+                        seoul_locations_loader=_load_seoul_trade_area_locations,
+                        seoul_quarter_loader=_load_seoul_quarter_dataset,
                     )
                 progress_box.empty()
 
