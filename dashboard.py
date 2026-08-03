@@ -25,10 +25,8 @@ from building_example import (
     add_coordinates_column,
     add_pyeong_columns,
     add_standard_price_column,
-    analyze_district_price_stats,
     analyze_district_stats,
     analyze_old_buildings,
-    analyze_price_history,
     analyze_seoul_trade_area_detail,
     analyze_transaction_stats,
     generate_pdf_report,
@@ -526,9 +524,9 @@ def _render_ledger_docs_section(ledger_docs):
                 st.caption("텍스트를 인식하지 못했습니다 — 위 이미지로 직접 확인하세요.")
 
 
-tab_single, tab_report, tab_price, tab_district, tab_old, tab_priceh, tab_map, tab_geocode, tab_commercial, tab_sangkwon, tab_seoul, tab_autopptx = st.tabs([
+tab_single, tab_report, tab_price, tab_district, tab_old, tab_map, tab_geocode, tab_commercial, tab_sangkwon, tab_seoul, tab_autopptx = st.tabs([
     "🔍 단일 조회", "📋 종합 리포트", "💰 실거래가",
-    "📊 동단위 통계", "🏚️ 노후건축물", "💹 공시가격 시계열", "🗺️ 지도 업로드",
+    "📊 동단위 통계", "🏚️ 노후건축물", "🗺️ 지도 업로드",
     "📍 지오코딩", "🏬 상업용부동산 공실률", "🏪 주변 상가업소", "🏙️ 서울 상권분석", "📑 자동 pptx 리포트",
 ])
 
@@ -1007,98 +1005,7 @@ with tab_old:
         st.download_button("📄 CSV 다운로드", csv_bytes, "old_buildings.csv", "text/csv", key="old_csv")
 
 # ------------------------------------------------------------------
-# 탭 6: 공시가격 시계열
-# ------------------------------------------------------------------
-with tab_priceh:
-    st.caption("사이드바의 번지(bun/ji)를 기준으로, 그 필지의 호(관리건축물대장PK)별 공시가격 추이를 봅니다.")
-    if st.button("공시가격 시계열 조회", type="primary", key="priceh_submit"):
-        if not service_key:
-            st.error("서비스키를 입력해주세요.")
-        else:
-            api = BuildingLedger(service_key)
-            try:
-                with st.spinner("주소를 코드로 변환하는 중..."):
-                    sigungu_code, bdong_code, addr_sido, addr_sigungu_name = _resolve_codes()
-                with st.spinner("주택가격 조회 중..."):
-                    price_df = get_building_ledger(
-                        api, ledger_type="주택가격", sigungu_code=sigungu_code, bdong_code=bdong_code,
-                        bun=bun or None, ji=ji if ji and ji != "0" else None,
-                        max_rows=5000, wait_time=0.3,
-                    )
-                st.session_state.price_history = analyze_price_history(price_df, top_units=10)
-            except Exception as e:
-                st.error(f"조회 실패: {e}")
-                st.session_state.price_history = None
-
-    ph = st.session_state.get("price_history")
-    if not ph:
-        st.info("**공시가격 시계열 조회** 버튼을 눌러주세요.")
-    elif not ph["단위목록"]:
-        st.warning("이 번지는 공시가격(주택가격) 데이터가 없습니다.")
-    else:
-        st.warning(ph["경고"])
-        for unit in ph["단위목록"]:
-            pk_short = str(unit["관리건축물대장PK"])[-6:]
-            st.markdown(
-                f"**호 PK…{pk_short}** · 최신 {unit['최신가격']/1e8:.2f}억({unit['최신연도']}) · "
-                f"최초 {unit['최초가격']/1e8:.2f}억({unit['최초연도']}) · "
-                f"총증감 {unit['총증감률(%)']}% · 연평균(CAGR) {unit['연평균상승률CAGR(%)']}%"
-            )
-            st.line_chart(unit["추이"].set_index("연도"))
-
-    st.divider()
-    st.subheader("🏘️ 동단위 공시가격 주변분석")
-    st.caption(
-        "동 전체 호(관리건축물대장PK)의 공시가격을 한 번에 불러와 분포·통계를 봅니다. "
-        "필지별로 API를 반복 호출하지 않아 표제부 전체 수집과 비슷한 속도이며(첫 조회는 20~40초 정도 "
-        "걸릴 수 있고, 이후 15분간 캐시되어 즉시 응답), 사이드바의 번지는 무시하고 동 전체를 봅니다."
-    )
-    if st.button("동단위 공시가격 분석", type="primary", key="priceh_district_submit"):
-        if not service_key:
-            st.error("서비스키를 입력해주세요.")
-        else:
-            try:
-                with st.spinner("주소를 코드로 변환하는 중..."):
-                    sigungu_code, bdong_code, addr_sido, addr_sigungu_name = _resolve_codes()
-                with st.spinner("동 전체 공시가격 수집 중... (캐시되어 있으면 즉시 완료)"):
-                    district_price_df = _load_district_prices(service_key, sigungu_code, bdong_code)
-
-                subject_price_eok = None
-                ph_now = st.session_state.get("price_history")
-                if ph_now and ph_now.get("단위목록"):
-                    subject_price_eok = ph_now["단위목록"][0]["최신가격"] / 1e8
-
-                st.session_state.district_price_stats = analyze_district_price_stats(
-                    district_price_df, subject_price_eok=subject_price_eok,
-                )
-            except Exception as e:
-                st.error(f"조회 실패: {e}")
-                st.session_state.district_price_stats = None
-
-    dps = st.session_state.get("district_price_stats")
-    if not dps or not dps.get("총괄"):
-        st.info("**동단위 공시가격 분석** 버튼을 눌러주세요.")
-    else:
-        st.warning(dps["경고"])
-        s = dps["총괄"]
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("호수(유닛수)", f"{s['호수(유닛수)']:,}")
-        c2.metric("평균 공시가격", f"{s['평균공시가격(억)']:.2f}억")
-        c3.metric("중앙값 공시가격", f"{s['중앙값공시가격(억)']:.2f}억")
-        c4.metric("최고 / 최저", f"{s['최고공시가격(억)']:.2f}억 / {s['최저공시가격(억)']:.2f}억")
-        st.caption(f"기준연도: {s['기준연도']}")
-
-        if dps["백분위"] is not None:
-            st.info(
-                f"📍 사이드바에 입력한 필지(번지 {bun}-{ji})의 최고가 호 공시가격 기준으로, "
-                f"이 동 전체 분포에서 하위 {dps['백분위']}% 지점에 해당합니다."
-            )
-
-        st.markdown("**공시가격 구간 분포**")
-        st.dataframe(dps["가격구간분포"], width='stretch')
-
-# ------------------------------------------------------------------
-# 탭 7: 지도 업로드 — 주소·위도·경도가 담긴 파일을 올리면 지도에 표시
+# 탭 6: 지도 업로드 — 주소·위도·경도가 담긴 파일을 올리면 지도에 표시
 # ------------------------------------------------------------------
 with tab_map:
     st.write("**주소·위도·경도** 컬럼이 포함된 CSV 또는 엑셀 파일을 업로드하면 모든 지점을 지도에 표시합니다.")
@@ -1209,7 +1116,7 @@ with tab_map:
         st.info("파일을 업로드해주세요.")
 
 # ------------------------------------------------------------------
-# 탭 8: 지오코딩 — 주소만 넣으면 경도·위도만 반환
+# 탭 7: 지오코딩 — 주소만 넣으면 경도·위도만 반환
 # ------------------------------------------------------------------
 with tab_geocode:
     st.write("**주소**를 입력하면 경도·위도 좌표만 조회합니다. 도로명·지번 주소 모두 지원합니다.")
@@ -1298,7 +1205,7 @@ with tab_geocode:
                 render_address_map(map_df, lat_col="위도", lon_col="경도", label_col="주소", vworld_key=vworld_key)
 
 # ------------------------------------------------------------------
-# 탭 9: 상업용부동산 공실률 (한국부동산원 R-ONE Open API)
+# 탭 8: 상업용부동산 공실률 (한국부동산원 R-ONE Open API)
 # ------------------------------------------------------------------
 with tab_commercial:
     st.write("한국부동산원 상업용부동산 임대동향조사의 상권별 공실률을 조회합니다. "
@@ -1382,7 +1289,7 @@ with tab_commercial:
                         st.line_chart(chart_df)
 
 # ------------------------------------------------------------------
-# 탭 10: 주변 상가업소 (소상공인시장진흥공단 상가(상권)정보 Open API)
+# 탭 9: 주변 상가업소 (소상공인시장진흥공단 상가(상권)정보 Open API)
 # ------------------------------------------------------------------
 with tab_sangkwon:
     st.write("**소상공인시장진흥공단 상가(상권)정보 Open API**로 특정 위치 반경 내 실제 점포(상가업소) 목록을 조회합니다. "
@@ -1483,7 +1390,7 @@ with tab_sangkwon:
                 render_address_map(map_df, label_col="표시", vworld_key=vworld_key, highlight_lat=lat, highlight_lon=lon)
 
 # ------------------------------------------------------------------
-# 탭 11: 서울 상권분석 (서울 열린데이터광장 우리마을가게 상권분석서비스 Open API)
+# 탭 10: 서울 상권분석 (서울 열린데이터광장 우리마을가게 상권분석서비스 Open API)
 # ------------------------------------------------------------------
 with tab_seoul:
     st.write("**서울 열린데이터광장 우리마을가게 상권분석서비스**로 서울시 상권의 추정매출·점포 현황·생활인구·직장인구를 조회합니다. "
@@ -1682,7 +1589,7 @@ with tab_seoul:
             render_address_map(map_df, label_col="표시", vworld_key=vworld_key, highlight_lat=lat, highlight_lon=lon)
 
 # ------------------------------------------------------------------
-# 탭 12: 자동 pptx 리포트 (주소 하나로 실제 데이터를 채운 부동산 분석 리포트 생성)
+# 탭 11: 자동 pptx 리포트 (주소 하나로 실제 데이터를 채운 부동산 분석 리포트 생성)
 # ------------------------------------------------------------------
 with tab_autopptx:
     st.write(
@@ -1691,10 +1598,9 @@ with tab_autopptx:
         "(서울 소재 시) 서울 상권분석까지, 실제로 조회한 데이터로 슬라이드를 채웁니다."
     )
     st.caption(
-        "💡 **종합 리포트(같은 번지) · 동단위 통계 · 노후건축물 · 공시가격 시계열(동단위 공시가격 분석) · "
-        "서울 상권분석** 탭을 이 리포트보다 먼저 조회해두면, 그 탭이 채워둔 결과/캐시를 그대로 재사용해 "
-        "해당 부분 조회 시간이 크게 줄어듭니다 (탭을 안 열어봤다면 리포트가 알아서 새로 조회하니 그냥 "
-        "눌러도 됩니다)."
+        "💡 **종합 리포트(같은 번지) · 동단위 통계 · 노후건축물 · 서울 상권분석** 탭을 이 리포트보다 "
+        "먼저 조회해두면, 그 탭이 채워둔 결과/캐시를 그대로 재사용해 해당 부분 조회 시간이 크게 "
+        "줄어듭니다 (탭을 안 열어봤다면 리포트가 알아서 새로 조회하니 그냥 눌러도 됩니다)."
     )
     if st.session_state.get("ledger_docs"):
         st.caption(
