@@ -97,15 +97,28 @@ def _patched_response_to_item_data(self, res, property_type, trade_type, sigungu
               f"failed with status code: {res.status_code}")
         return None
 
+    # XML이든(정상 케이스) JSON이든(결과 0건이거나 드물게 XML 대신 JSON으로 응답하는
+    # 경우가 관찰됨) 한 번만 파싱해서, 어느 쪽으로 왔든 아래 오류/헤더 검사를 동일하게
+    # 적용한다 — 이전에는 XML 파싱 결과에만 <OpenAPI_ServiceResponse> 오류 포맷을
+    # 검사해서, 그 오류가 JSON으로 온 경우(HTTP 502 게이트웨이 오류 등 실제 확인됨)를
+    # 놓치고 있었다.
     try:
         parsed = xmltodict.parse(res.text)
     except Exception:
-        parsed = None
-    envelope = parsed.get("response") if isinstance(parsed, dict) else None
+        try:
+            parsed = json.loads(res.text)
+        except Exception:
+            parsed = None
 
-    # 서비스키 미등록 등 실제 API 오류는 <OpenAPI_ServiceResponse> 포맷으로 온다
-    # (원본 PublicDataReader가 처리하던 케이스) — 이 정보는 놓치지 않고 그대로 보존한다.
-    if envelope is None and isinstance(parsed, dict) and "OpenAPI_ServiceResponse" in parsed:
+    if not isinstance(parsed, dict):
+        raise Exception(
+            f"Request of {property_type}, {trade_type}, {sigungu_code} for {year_month} "
+            f"응답을 해석하지 못했습니다(XML/JSON 모두 실패). 응답 본문 일부: {res.text[:200]!r}"
+        )
+
+    # 서비스키 미등록·게이트웨이 오류 등 실제 API 오류는 <OpenAPI_ServiceResponse>
+    # 포맷으로 온다(원본 PublicDataReader가 처리하던 케이스) — 그대로 보존한다.
+    if "OpenAPI_ServiceResponse" in parsed:
         hdr = (parsed["OpenAPI_ServiceResponse"] or {}).get("cmmMsgHeader") or {}
         if hdr.get("errMsg"):
             raise Exception(
@@ -113,18 +126,7 @@ def _patched_response_to_item_data(self, res, property_type, trade_type, sigungu
                 f"failed with error: {hdr.get('errMsg')}, error code: '{hdr.get('returnReasonCode')}'"
             )
 
-    if envelope is None:
-        try:
-            json_body = json.loads(res.text)
-            envelope = json_body.get("response") or json_body
-        except Exception:
-            envelope = None
-        if envelope is None:
-            raise Exception(
-                f"Request of {property_type}, {trade_type}, {sigungu_code} for {year_month} "
-                f"응답을 해석하지 못했습니다(XML/JSON 모두 실패). 응답 본문 일부: {res.text[:200]!r}"
-            )
-
+    envelope = parsed.get("response") or parsed
     header = envelope.get("header") if isinstance(envelope, dict) else None
     if header is None:
         raise Exception(
@@ -551,6 +553,59 @@ def analyze_transaction_stats(df: pd.DataFrame) -> dict:
     return {"총괄": summary, "유형별": by_type, "연월별추이": trend}
 
 
+_DATA_GO_KR_TRANSIENT_STATUS = {500, 502, 503, 504}
+
+
+def _fetch_data_go_kr_envelope(url: str, params: dict, retries: int = 3, timeout: float = 15) -> dict:
+    """건축HUB 등 data.go.kr XML API를 호출해 {"header":..., "body":...} 형태의 envelope로 정규화.
+
+    - HTTP 500/502/503/504(게이트웨이 과부하 등 일시적 오류)는 지수 백오프로 재시도한다.
+    - 응답이 XML이든(정상 케이스) JSON이든(결과 0건이거나 드물게 XML 대신 JSON으로 응답하는
+      경우가 관찰됨 — 건축HUB·국토부 실거래가 API 공통), <response> 래퍼가 있든 없든 전부
+      같은 header/body 구조로 맞춰 반환한다.
+    - 서비스키 미등록·게이트웨이 HTTP_ERROR 같은 실제 API 오류는 <OpenAPI_ServiceResponse>/
+      cmmMsgHeader 포맷으로 오는데, 이게 XML로 오든 JSON으로 오든(HTTP 502 게이트웨이 오류
+      본문이 JSON으로 온 사례가 실제 확인됨) 놓치지 않고 원래 오류 메시지를 그대로 보여준다.
+    """
+    res = None
+    for attempt in range(retries):
+        res = requests.get(url, params=params, verify=False, timeout=timeout)
+        if res.status_code not in _DATA_GO_KR_TRANSIENT_STATUS or attempt == retries - 1:
+            break
+        time.sleep(0.6 * (attempt + 1))
+
+    try:
+        parsed = xmltodict.parse(res.text)
+    except Exception:
+        try:
+            parsed = json.loads(res.text)
+        except Exception:
+            parsed = None
+
+    if not isinstance(parsed, dict):
+        raise Exception(
+            f"API가 XML도 JSON도 아닌 응답을 반환했습니다 (HTTP {res.status_code}). "
+            f"응답 본문 일부: {res.text[:300]!r}"
+        )
+
+    if "OpenAPI_ServiceResponse" in parsed:
+        hdr = (parsed["OpenAPI_ServiceResponse"] or {}).get("cmmMsgHeader") or {}
+        if hdr.get("errMsg"):
+            raise Exception(f"{hdr['errMsg']} (코드: {hdr.get('returnReasonCode')}, HTTP {res.status_code})")
+
+    envelope = parsed.get("response") or parsed
+    header = envelope.get("header") if isinstance(envelope, dict) else None
+    if header is None:
+        raise Exception(
+            f"API 응답에 header가 없습니다 (HTTP {res.status_code}). "
+            f"응답 본문 일부: {res.text[:300]!r}"
+        )
+    if header.get("resultCode") != "00":
+        raise Exception(header.get("resultMsg") or f"알 수 없는 오류 (HTTP {res.status_code})")
+
+    return envelope
+
+
 def get_building_ledger(
     api: BuildingLedger,
     ledger_type: str,
@@ -619,45 +674,7 @@ def get_building_ledger(
     total_count = None
     while True:
         params["pageNo"] = page
-        res = requests.get(url, params=params, verify=False, timeout=15)
-        try:
-            parsed = xmltodict.parse(res.text)
-        except Exception:
-            parsed = None
-        envelope = parsed.get("response") if isinstance(parsed, dict) else None
-
-        # 서비스키 미등록/한도초과 등 게이트웨이 레벨 오류는 <response> 대신
-        # <OpenAPI_ServiceResponse> 포맷으로 온다 — 이 경우를 놓치면 아래
-        # "header가 없다"는 불명확한 메시지로 뭉개져 실제 원인을 알 수 없다.
-        if envelope is None and isinstance(parsed, dict) and "OpenAPI_ServiceResponse" in parsed:
-            hdr = (parsed["OpenAPI_ServiceResponse"] or {}).get("cmmMsgHeader") or {}
-            if hdr.get("errMsg"):
-                raise Exception(f"{hdr['errMsg']} (코드: {hdr.get('returnReasonCode')})")
-
-        if envelope is None:
-            # data.go.kr 계열 API는 (결과 0건이든 정상 데이터든) XML 대신
-            # JSON으로 응답하는 경우가 있다. 구조는 XML을 파싱했을 때와
-            # 동일(header/body)하므로 그대로 같은 경로로 처리한다.
-            try:
-                json_body = json.loads(res.text)
-                envelope = json_body.get("response") or json_body
-            except Exception:
-                envelope = None
-            if envelope is None:
-                raise Exception(
-                    f"API가 XML도 JSON도 아닌 응답을 반환했습니다 (HTTP {res.status_code}). "
-                    f"응답 본문 일부: {res.text[:300]!r}"
-                )
-
-        header = envelope.get("header") if isinstance(envelope, dict) else None
-        if header is None:
-            raise Exception(
-                f"API 응답에 header가 없습니다 (HTTP {res.status_code}). "
-                f"응답 본문 일부: {res.text[:300]!r}"
-            )
-        if header.get("resultCode") != "00":
-            raise Exception(header.get("resultMsg") or "알 수 없는 오류")
-
+        envelope = _fetch_data_go_kr_envelope(url, params)
         body = envelope.get("body") or {}
         total_count = int(body.get("totalCount") or 0)
         items = body.get("items")
