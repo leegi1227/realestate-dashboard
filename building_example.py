@@ -1343,10 +1343,23 @@ def _reb_request(reb_key: str, statbl_id: str, **params):
     데이터가 없으면(INFO-200) 빈 DataFrame과 안내 메시지를, 정상이면
     데이터가 담긴 DataFrame과 None을 반환한다. 그 외 에러(ERROR-*)는
     예외로 올려서 호출부가 st.error로 그대로 보여줄 수 있게 한다.
+
+    한국부동산원 서버는 연결 자체가 간헐적으로 타임아웃나는 경우가 실제 관찰돼
+    (ConnectTimeout — HTTP 응답조차 못 받는 수준), 이런 순수 연결 단계 오류만
+    짧게 재시도한다. API가 실제로 응답해서 나는 오류(위 ERROR-* 등)는 재시도해도
+    똑같이 실패할 뿐이므로 재시도하지 않는다.
     """
     url = f"{REB_OPENAPI_BASE}/SttsApiTblData.do"
     query = {"KEY": reb_key, "STATBL_ID": statbl_id, "Type": "json", "DTACYCLE_CD": "QY", **params}
-    res = requests.get(url, params=query, timeout=15)
+    res = None
+    for attempt in range(3):
+        try:
+            res = requests.get(url, params=query, timeout=15)
+            break
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            if attempt == 2:
+                raise RuntimeError(f"한국부동산원 서버에 연결하지 못했습니다(재시도 3회 실패): {e}")
+            time.sleep(1.0 * (attempt + 1))
     res.raise_for_status()
     data = res.json()
     if "SttsApiTblData" not in data:

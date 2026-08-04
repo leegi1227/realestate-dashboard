@@ -1265,7 +1265,7 @@ with tab_commercial:
             try:
                 with st.spinner("조회 중..."):
                     snap_df, used_quarter, snap_message = get_reb_vacancy_snapshot(reb_key, statbl_id, selected_quarter)
-            except RuntimeError as e:
+            except Exception as e:
                 st.error(str(e))
                 snap_df, used_quarter, snap_message = pd.DataFrame(), selected_quarter, None
 
@@ -1309,7 +1309,7 @@ with tab_commercial:
                             trend_df, trend_message = get_reb_vacancy_trend(
                                 reb_key, statbl_id, cls_id, "202403", latest_quarter,
                             )
-                    except RuntimeError as e:
+                    except Exception as e:
                         st.error(str(e))
                         trend_df = pd.DataFrame()
 
@@ -1390,7 +1390,7 @@ with tab_sangkwon:
                                 sangkwon_key, lon, lat, radius=int(radius),
                                 inds_lcls_cd=lcls_cd, inds_mcls_cd=mcls_cd, inds_scls_cd=scls_cd,
                             )
-                    except RuntimeError as e:
+                    except Exception as e:
                         st.error(str(e))
                         stores_df = pd.DataFrame()
                     st.session_state.sangkwon_result = (addr, lat, lon, int(radius), stores_df)
@@ -1492,7 +1492,7 @@ with tab_seoul:
                             addr, lon, lat, trdar_row, distance_m,
                             selng_df, selng_q, stor_df, stor_q, flpop_df, flpop_q, wrc_df, wrc_q,
                         )
-                except RuntimeError as e:
+                except Exception as e:
                     st.error(str(e))
                     st.session_state.seoul_result = None
 
