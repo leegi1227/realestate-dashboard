@@ -158,6 +158,23 @@ function addSubwayLines(L, map) {
   });
 }
 
+function addRoadFlow(L, map, roadFlow) {
+  // golmok.seoul.go.kr(서울시 상권분석서비스)의 "유동인구(도로별)" 지도와 같은 방식 —
+  // dashboard.py가 도로 구간별 색/굵기를 미리 계산해 {points, color, weight} 형태로
+  // 넘겨준다(등급→색상 매핑은 JS가 아니라 파이썬 쪽에서 한 번만 계산). 지하철 노선처럼
+  // 맨 밑에 깔아서 마커·라벨이 그 위에 얹히게 한다.
+  (roadFlow || []).forEach((seg) => {
+    if (!seg || !Array.isArray(seg.points) || seg.points.length < 2) return;
+    L.polyline(seg.points, {
+      color: seg.color || "#FD8D3C",
+      weight: seg.weight || 4,
+      opacity: 0.8,
+      lineCap: "round",
+      lineJoin: "round",
+    }).addTo(map);
+  });
+}
+
 function addSubwayExits(L, map) {
   const EXIT_COLOR = "#FFC400";
   getSubwayExits().forEach(([lat, lon, ref]) => {
@@ -241,6 +258,10 @@ function renderMap(L, mapEl, data, setTriggerValue) {
   } else {
     addOsmLayer();
   }
+
+  // 도로별 유동인구(golmok.seoul.go.kr 재현) — 있으면 가장 먼저(맨 밑에) 깔아서
+  // 그 위의 지하철 노선·마커가 항상 보이게 한다.
+  addRoadFlow(L, map, data.roadFlow);
 
   // 지하철 노선·출구·역 — 카카오맵/네이버맵처럼 굵은 노선색 선 + 출구 번호 원 +
   // 역마다 노선색 배지로 표시한다(SUBWAY_LINES/SUBWAY_EXITS/SUBWAY_STATIONS, 파일

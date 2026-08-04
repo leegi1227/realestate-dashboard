@@ -1670,11 +1670,100 @@ def load_seoul_adstrd_codes() -> pd.DataFrame:
     읍면동코드(3자리)를 이어붙인 8자리가 이 프로젝트에서 쓰는 "행정동코드"다.
 
     법정동과 행정동은 이름이 같아도 코드 체계가 다르고 심지어 갈라지기도 한다
-    (예: 법정동 "이태원동" 하나가 행정동으로는 "이태원1동"(11030650)·"이태원2동"
-    (11030660) 둘로 나뉜다) — 이 표가 없으면 국토부 법정동코드로 생활인구 API를
+    (예: 법정동 "이태원동" 하나가 행정동으로는 "이태원1동"(11170650)·"이태원2동"
+    (11170660) 둘로 나뉜다) — 이 표가 없으면 국토부 법정동코드로 생활인구 API를
     바로 조회할 수 없다.
     """
     return pd.read_csv(_SEOUL_ADSTRD_CODES_PATH, encoding="utf-8-sig", dtype=str)
+
+
+# ------------------------------------------------------------------
+# golmok.seoul.go.kr(서울시 상권분석서비스, "골목상권") 도로별 유동인구 — 비공식 내부 API.
+#
+# data.seoul.go.kr Open API 카탈로그에 등록된 서비스가 아니라, golmok.seoul.go.kr
+# 사이트 자체가 지도에 "유동인구(도로별)"를 그릴 때 쓰는 내부 AJAX 호출을 브라우저
+# 개발자도구(Network 탭)로 확인해 그대로 재현한 것이다. 인증키 불필요, 세션 쿠키
+# 없이도 정상 응답이 오는 것을 직접 확인했다(2026-08-03). 공식 API가 아니므로
+# 예고 없이 바뀌거나 막힐 수 있다는 점을 감안해야 한다 — 화면에 공개적으로 보여주는
+# 정보를 그대로 가져오는 것일 뿐, 로그인·인증 우회는 없다.
+# ------------------------------------------------------------------
+GOLMOK_FPOP_URL = "https://golmok.seoul.go.kr/tool/wfs/fpop.json"
+
+
+def get_golmok_road_flow(lon: float, lat: float, radius_m: float = 350, timeout: float = 15) -> list:
+    """(lon, lat) 중심 반경 radius_m미터 정사각형 범위의 도로 구간별 유동인구 강도를 가져온다.
+
+    반환값은 [{"roadLinkId", "cost", "grade"(1~5), "per"(0~100), "wkt"(EPSG:5181
+    LINESTRING 문자열)}, ...] 형태의 원본 응답 그대로다. grade가 높을수록(5가 최고)
+    유동인구가 많은 도로 구간이다. dayweek=1(평일 추정)·agrde=00(전체 연령)·
+    tmzon=00(전체 시간대) 고정값으로 요청한다 — 다른 값의 의미는 실제 응답으로
+    검증되지 않았다.
+    """
+    from pyproj import Transformer
+
+    to_5181 = Transformer.from_crs("EPSG:4326", "EPSG:5181", always_xy=True)
+    cx, cy = to_5181.transform(lon, lat)
+
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": "https://golmok.seoul.go.kr/commercialArea/commercialArea.do",
+        "Origin": "https://golmok.seoul.go.kr",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+    }
+    data = {
+        "minx": cx - radius_m, "miny": cy - radius_m,
+        "maxx": cx + radius_m, "maxy": cy + radius_m,
+        "wkt": "", "dayweek": "1", "agrde": "00", "tmzon": "00",
+        "ext": "ext", "signguCd": "11",
+    }
+    res = requests.post(GOLMOK_FPOP_URL, headers=headers, data=data, timeout=timeout)
+    res.raise_for_status()
+    try:
+        return res.json()
+    except ValueError:
+        raise Exception(f"golmok 응답을 JSON으로 해석하지 못했습니다. 응답 본문 일부: {res.text[:300]!r}")
+
+
+_WKT_LINESTRING_RE = re.compile(r"LINESTRING\s*\((.+)\)", re.I)
+
+
+def parse_golmok_road_flow(rows: list) -> pd.DataFrame:
+    """get_golmok_road_flow() 원본 응답을 지도에 바로 그릴 수 있는 위경도 좌표열로 변환.
+
+    각 도로 구간의 WKT(EPSG:5181 LINESTRING)를 [[위도, 경도], ...] 점 목록으로 바꾼
+    "points" 컬럼을 추가한다. 파싱 실패한 구간(형식이 다른 WKT 등)은 조용히 건너뛴다.
+    """
+    from pyproj import Transformer
+
+    to_wgs84 = Transformer.from_crs("EPSG:5181", "EPSG:4326", always_xy=True)
+    out = []
+    for row in rows or []:
+        m = _WKT_LINESTRING_RE.match(str(row.get("wkt") or "").strip())
+        if not m:
+            continue
+        points = []
+        for pair in m.group(1).split(","):
+            parts = pair.strip().split()
+            if len(parts) != 2:
+                continue
+            x, y = float(parts[0]), float(parts[1])
+            plon, plat = to_wgs84.transform(x, y)
+            points.append([plat, plon])
+        if len(points) < 2:
+            continue
+        out.append({
+            "roadLinkId": row.get("roadLinkId"),
+            "grade": row.get("grade"),
+            "per": row.get("per"),
+            "cost": row.get("cost"),
+            "points": points,
+        })
+    return pd.DataFrame(out)
 
 
 def seoul_current_quarter_id(today: datetime.date = None) -> str:

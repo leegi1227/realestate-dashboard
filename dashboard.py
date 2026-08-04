@@ -54,6 +54,8 @@ from building_example import (
     get_seoul_living_population,
     analyze_seoul_living_population,
     load_seoul_adstrd_codes,
+    get_golmok_road_flow,
+    parse_golmok_road_flow,
     reverse_match_transactions,
     split_common_and_varying,
 )
@@ -144,6 +146,32 @@ def _declutter_label_levels(lats, lons, zoom, label_width_px=260, row_height_px=
     return levels
 
 
+# golmok.seoul.go.kr 도로별 유동인구의 grade(1~5, 5가 최고)를 ColorBrewer YlOrRd
+# 5단계 배색으로 매핑 — 옅은 노랑(한산)에서 짙은 빨강(혼잡)까지.
+_ROAD_FLOW_GRADE_COLORS = {
+    1: "#FFEDA0", 2: "#FEB24C", 3: "#FD8D3C", 4: "#FC4E2A", 5: "#B10026",
+}
+
+
+def _road_flow_to_map_payload(road_df: pd.DataFrame) -> list:
+    """parse_golmok_road_flow() 결과를 render_address_map(road_flow=...)가 바로 쓸 수 있는
+
+    [{"points", "color", "weight"}, ...] 리스트로 바꾼다. grade가 높을수록(혼잡)
+    색을 진하게, 선도 굵게 그려서 한눈에 구분되게 한다.
+    """
+    if road_df is None or road_df.empty:
+        return []
+    payload = []
+    for _, row in road_df.iterrows():
+        grade = int(row["grade"]) if pd.notna(row.get("grade")) else 1
+        payload.append({
+            "points": row["points"],
+            "color": _ROAD_FLOW_GRADE_COLORS.get(grade, "#FD8D3C"),
+            "weight": 2 + grade,
+        })
+    return payload
+
+
 def render_address_map(
     df: pd.DataFrame,
     lat_col: str = "lat",
@@ -155,6 +183,7 @@ def render_address_map(
     selection_key: str = None,
     highlight_lat: float = None,
     highlight_lon: float = None,
+    road_flow: list = None,
 ):
     """지점을 구글 지도 스타일 핀으로 지도 위에 표시하고, show_labels=True면 핀 옆에
 
@@ -174,6 +203,11 @@ def render_address_map(
     테두리 원(halo)을 표시해 "이 마커가 지금 선택된 지점"임을 시각적으로 나타낸다.
     표 → 지도 방향 강조(이 옵션)와 지도 → 표 방향 강조(enable_selection)는 서로
     독립적으로 켤 수 있다.
+
+    road_flow를 넘기면(golmok 도로별 유동인구 등) [{"points": [[lat,lon],...],
+    "color": "#rrggbb", "weight": N}, ...] 형태로 도로 구간을 색칠된 선으로 지도
+    맨 밑에 깔아 그린다 — 색/굵기 계산은 호출부(파이썬)에서 미리 끝내고 컴포넌트는
+    그대로 그리기만 한다.
     """
     plot_df = df.copy()
     if label_col and label_col in plot_df.columns:
@@ -230,6 +264,7 @@ def render_address_map(
             "enableSelection": enable_selection,
             "singleZoom": zoom if len(plot_df) <= 1 else 17,
             "vworldKey": vworld_key,
+            "roadFlow": road_flow,
         },
         height=460,
         **component_kwargs,
@@ -1705,6 +1740,67 @@ with tab_flpop:
                 st.download_button(
                     "📄 CSV 다운로드", flpop_csv, "seoul_living_population.csv", "text/csv",
                     key="flpop_csv",
+                )
+
+    st.divider()
+    st.subheader("🛣️ 도로별 유동인구 지도")
+    st.write(
+        "golmok.seoul.go.kr(서울시 상권분석서비스 '골목상권')가 지도에 표시하는 것과 같은 "
+        "**도로 구간별 유동인구 강도**를 사이드바 주소 기준으로 조회해 지도에 색으로 표시합니다."
+    )
+    st.warning(
+        "⚠️ 이 기능은 서울 열린데이터광장에 정식 등록된 오픈API가 아니라, golmok.seoul.go.kr "
+        "사이트 자체가 내부적으로 쓰는 요청을 브라우저 개발자도구로 확인해 재현한 것입니다 — "
+        "화면에 공개적으로 보여주는 정보를 그대로 가져오는 것이지만, 공식 API가 아니므로 "
+        "예고 없이 바뀌거나 막힐 수 있습니다."
+    )
+    if not kakao_key:
+        st.warning("사이드바에 카카오맵 REST API 키를 입력해야 주소를 좌표로 변환할 수 있습니다.")
+    else:
+        road_radius = st.slider(
+            "조회 반경(m)", 200, 800, 350, step=50, key="road_flow_radius",
+            help="사이드바 주소를 중심으로 한 정사각형 범위의 절반 길이입니다.",
+        )
+
+        if st.button("도로별 유동인구 조회", type="primary", key="road_flow_submit"):
+            try:
+                road_addr = (
+                    f"서울특별시 {addr_gu} {addr_dong}"
+                    + (f" {bun}" if bun else "")
+                    + (f"-{ji}" if ji and str(ji) != "0" else "")
+                )
+                with st.spinner("주소 좌표 변환 중..."):
+                    coord, reason = geocode_address_kakao(kakao_key, road_addr)
+                if not coord:
+                    st.error(f"좌표를 찾지 못했습니다 ({reason}).")
+                    st.session_state.road_flow_result = None
+                else:
+                    lon, lat = coord
+                    with st.spinner("도로별 유동인구 조회 중..."):
+                        road_rows = get_golmok_road_flow(lon, lat, radius_m=road_radius)
+                        road_df = parse_golmok_road_flow(road_rows)
+                    st.session_state.road_flow_result = (road_addr, lat, lon, road_df)
+            except Exception as e:
+                st.error(f"조회 실패: {e}")
+                st.session_state.road_flow_result = None
+
+        road_flow_result = st.session_state.get("road_flow_result")
+        if road_flow_result is None:
+            st.info("반경을 고르고 **도로별 유동인구 조회**를 눌러주세요.")
+        else:
+            used_addr, r_lat, r_lon, road_df = road_flow_result
+            if road_df is None or road_df.empty:
+                st.info(f"'{used_addr}' 주변에서 도로 데이터를 찾지 못했습니다. 반경을 늘려보세요.")
+            else:
+                st.success(f"'{used_addr}' 주변 반경 {road_radius}m 내 도로 {len(road_df)}건 조회됨")
+                render_address_map(
+                    pd.DataFrame([{"lat": r_lat, "lon": r_lon}]),
+                    show_labels=False, vworld_key=vworld_key,
+                    road_flow=_road_flow_to_map_payload(road_df),
+                )
+                st.caption(
+                    "색이 옅은 노랑→짙은 빨강 순으로 유동인구 등급(1~5, golmok.seoul.go.kr 기준)이 "
+                    "높아집니다. 지도 위 📍는 조회 기준 위치입니다."
                 )
 
 # ------------------------------------------------------------------
