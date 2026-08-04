@@ -1402,7 +1402,10 @@ def _build_price_history(master, district_price_df=None):
     return {"trend": trend, "rows": rows, "note": note, "district": district}
 
 
-def _build_commercial(reb_key, sangkwon_key, dong_name, lon, lat, seoul_detail=None):
+def _build_commercial(
+    reb_key, sangkwon_key, dong_name, lon, lat, seoul_detail=None,
+    vacancy_snapshot_loader=None, vacancy_trend_loader=None, stores_loader=None,
+):
     """공실률/주변 업종 조회. 실패 사유를 삼키지 않고 result["notes"]에 남겨서
     리포트에 왜 이 섹션이 비었는지 대시보드에서 그대로 보여줄 수 있게 한다.
 
@@ -1428,7 +1431,10 @@ def _build_commercial(reb_key, sangkwon_key, dong_name, lon, lat, seoul_detail=N
         try:
             statbl_id = REB_COMMERCIAL_VACANCY_STATBL_IDS["중대형 상가"]
             quarter = reb_current_quarter_id()
-            snap_df, used_quarter, _ = get_reb_vacancy_snapshot(reb_key, statbl_id, quarter)
+            if vacancy_snapshot_loader:
+                snap_df, used_quarter, _ = vacancy_snapshot_loader(reb_key, statbl_id, quarter)
+            else:
+                snap_df, used_quarter, _ = get_reb_vacancy_snapshot(reb_key, statbl_id, quarter)
             if snap_df is None or snap_df.empty:
                 result["notes"].append("공실률: 한국부동산원 응답이 비어 있음")
             else:
@@ -1439,7 +1445,10 @@ def _build_commercial(reb_key, sangkwon_key, dong_name, lon, lat, seoul_detail=N
                 else:
                     cls_id = match.iloc[0]["CLS_ID"]
                     result["vacancy_label"] = f"중대형 상가 · {match.iloc[0]['CLS_FULLNM']}"
-                    trend_df, _ = get_reb_vacancy_trend(reb_key, statbl_id, cls_id, "202403", used_quarter)
+                    if vacancy_trend_loader:
+                        trend_df, _ = vacancy_trend_loader(reb_key, statbl_id, cls_id, "202403", used_quarter)
+                    else:
+                        trend_df, _ = get_reb_vacancy_trend(reb_key, statbl_id, cls_id, "202403", used_quarter)
                     if trend_df is None or trend_df.empty:
                         result["notes"].append("공실률: 추이 데이터 없음")
                     else:
@@ -1461,7 +1470,10 @@ def _build_commercial(reb_key, sangkwon_key, dong_name, lon, lat, seoul_detail=N
         result["notes"].append("주변 업종: 좌표(지오코딩) 실패로 조회 불가")
     else:
         try:
-            stores_df = get_nearby_stores(sangkwon_key, lon, lat, radius=500)
+            if stores_loader:
+                stores_df = stores_loader(sangkwon_key, lon, lat, radius=500)
+            else:
+                stores_df = get_nearby_stores(sangkwon_key, lon, lat, radius=500)
             if stores_df is None or stores_df.empty or "indsLclsNm" not in stores_df.columns:
                 result["notes"].append("주변 업종: 반경 500m 내 데이터 없음")
             else:
@@ -1664,15 +1676,19 @@ def fetch_report_data(
     progress_callback=None,
     district_title_loader=None, district_price_loader=None,
     seoul_locations_loader=None, seoul_quarter_loader=None,
+    transaction_loader=None, vacancy_snapshot_loader=None, vacancy_trend_loader=None,
+    stores_loader=None,
     single_report=None,
 ) -> dict:
     """주소(시군구/법정동/번지) 하나에 대해 실제 데이터를 모아 generate_pptx()용 딕셔너리로 반환.
 
-    district_title_loader/district_price_loader/seoul_locations_loader/seoul_quarter_loader는
+    district_title_loader/district_price_loader/seoul_locations_loader/seoul_quarter_loader/
+    transaction_loader/vacancy_snapshot_loader/vacancy_trend_loader/stores_loader는
     대시보드의 @st.cache_data 래퍼(_load_district_titles 등)를 그대로 넘겨받기 위한 훅이다.
-    사용자가 동단위통계·노후건축물·공시가격시계열·서울상권분석 탭을 이 리포트보다 먼저
-    조회해뒀다면, 같은 캐시를 맞고 API 재호출 없이 즉시 재사용된다 — 안 넘기면(None) 지금처럼
-    매번 새로 조회한다.
+    사용자가 동단위통계·노후건축물·실거래가·상업용부동산 공실률·주변 상가업소·서울상권분석
+    탭을 이 리포트보다 먼저 조회해뒀고 그 조회 조건(부동산유형/거래유형/기간, 상권분류/분기,
+    반경·업종 등)이 리포트가 필요로 하는 것과 정확히 같다면, 같은 캐시를 맞고 API 재호출 없이
+    즉시 재사용된다 — 조건이 다르거나 안 넘기면(None) 지금처럼 매번 새로 조회한다.
 
     single_report는 "종합 리포트" 탭이 이미 조회해 둔 {ledger_type: DataFrame} 결과다.
     호출부(대시보드)가 그 조회에 쓰인 sigungu_code/bdong_code/bun/ji가 지금 이 리포트와
@@ -1718,6 +1734,7 @@ def fetch_report_data(
         months_lookback=months_lookback, district_title_df=district_title_df,
         sido=sido, sigungu_name=sigungu_name, dong_name=dong_name,
         vworld_key=vworld_key, kakao_key=kakao_key, prefetched_ledgers=single_report,
+        transaction_loader=transaction_loader,
     )
 
     data = {
@@ -1873,7 +1890,11 @@ def fetch_report_data(
         data["trade_area_map"] = None
 
     _progress("상업용부동산 공실률 · 주변 업종 조회 중...")
-    data["commercial"] = _build_commercial(reb_key, sangkwon_key, dong_name, lon, lat, seoul_detail=seoul_detail)
+    data["commercial"] = _build_commercial(
+        reb_key, sangkwon_key, dong_name, lon, lat, seoul_detail=seoul_detail,
+        vacancy_snapshot_loader=vacancy_snapshot_loader, vacancy_trend_loader=vacancy_trend_loader,
+        stores_loader=stores_loader,
+    )
     notes.extend(data["commercial"].get("notes") or [])
     if data["commercial"]["vacancy_trend"]:
         summary_stats.append({"label": "공실률", "value": f"{data['commercial']['vacancy_trend'][-1]['value']}%", "sub": data["commercial"]["vacancy_label"]})

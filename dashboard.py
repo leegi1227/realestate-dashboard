@@ -338,6 +338,57 @@ def _load_seoul_quarter_dataset(seoul_key: str, service: str):
     return get_seoul_trade_area_quarter_dataset(seoul_key, service)
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def _load_reb_vacancy_snapshot(reb_key: str, statbl_id: str, wrttime_id: str):
+    """한국부동산원 공실률 한 분기 스냅샷을 15분 캐시.
+
+    상업용부동산 공실률 탭과 자동pptx 리포트가 같은 인자(statbl_id="중대형 상가",
+    최신 분기)로 호출하는 경우가 많아, 둘 중 하나를 먼저 조회해두면 다른 쪽은
+    API 재호출 없이 즉시 재사용된다."""
+    return get_reb_vacancy_snapshot(reb_key, statbl_id, wrttime_id)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _load_reb_vacancy_trend(reb_key: str, statbl_id: str, cls_id: str, start_wrttime: str, end_wrttime: str):
+    """한국부동산원 공실률 추이(특정 상권, 여러 분기)를 15분 캐시."""
+    return get_reb_vacancy_trend(reb_key, statbl_id, cls_id, start_wrttime, end_wrttime)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _load_nearby_stores(
+    service_key: str, lon: float, lat: float, radius: int = 500,
+    inds_lcls_cd: str = None, inds_mcls_cd: str = None, inds_scls_cd: str = None,
+):
+    """소상공인 상가업소(반경 내) 조회를 15분 캐시. 자동pptx 리포트는 항상 업종
+    미필터·반경 500m로 호출하므로, 탭에서도 같은 조건(업종 '전체', 반경 500m)으로
+    조회해뒀을 때만 캐시가 재사용된다."""
+    return get_nearby_stores(
+        service_key, lon, lat, radius=radius,
+        inds_lcls_cd=inds_lcls_cd, inds_mcls_cd=inds_mcls_cd, inds_scls_cd=inds_scls_cd,
+    )
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _load_transaction_price(
+    service_key: str, property_type: str, trade_type: str, sigungu_code: str,
+    year_month: str = None, start_year_month: str = None, end_year_month: str = None,
+):
+    """국토부 실거래가 조회를 15분 캐시. 실거래가 탭과 자동pptx 리포트가 같은
+    부동산유형/거래유형/시군구/기간으로 조회했을 때만 재사용된다 — 리포트는
+    항상 '최근 N개월(오늘 기준)' 기간을 쓰므로, 탭에서 그와 동일한 기간을
+    조회해둔 경우에만 캐시가 맞는다."""
+    tp_api = TransactionPrice(service_key)
+    if year_month:
+        return tp_api.get_data(
+            property_type=property_type, trade_type=trade_type,
+            sigungu_code=sigungu_code, year_month=year_month,
+        )
+    return tp_api.get_data(
+        property_type=property_type, trade_type=trade_type,
+        sigungu_code=sigungu_code, start_year_month=start_year_month, end_year_month=end_year_month,
+    )
+
+
 st.set_page_config(page_title="건축물대장 조회", page_icon="🏢", layout="wide")
 
 
@@ -850,20 +901,18 @@ with tab_price:
         if not service_key:
             st.error("서비스키를 입력해주세요.")
         else:
-            tp_api = TransactionPrice(service_key)
             try:
                 with st.spinner("조회 중..."):
                     if tp_period_mode:
-                        tp_df = tp_api.get_data(
-                            property_type=tp_property_type, trade_type=tp_trade_type,
-                            sigungu_code=tp_sigungu,
+                        tp_df = _load_transaction_price(
+                            service_key, tp_property_type, tp_trade_type, tp_sigungu,
                             start_year_month=tp_start, end_year_month=tp_end,
-                        )
+                        ).copy()
                     else:
-                        tp_df = tp_api.get_data(
-                            property_type=tp_property_type, trade_type=tp_trade_type,
-                            sigungu_code=tp_sigungu, year_month=tp_year_month,
-                        )
+                        tp_df = _load_transaction_price(
+                            service_key, tp_property_type, tp_trade_type, tp_sigungu,
+                            year_month=tp_year_month,
+                        ).copy()
                     tp_df = add_address_column(tp_df, sido=tp_sido, sigungu_name=tp_sigungu_name)
                     if tp_dong != "(전체)" and "법정동" in tp_df.columns:
                         tp_df = tp_df[tp_df["법정동"] == tp_dong].reset_index(drop=True)
@@ -1264,7 +1313,7 @@ with tab_commercial:
             statbl_id = REB_COMMERCIAL_VACANCY_STATBL_IDS[commercial_type]
             try:
                 with st.spinner("조회 중..."):
-                    snap_df, used_quarter, snap_message = get_reb_vacancy_snapshot(reb_key, statbl_id, selected_quarter)
+                    snap_df, used_quarter, snap_message = _load_reb_vacancy_snapshot(reb_key, statbl_id, selected_quarter)
             except Exception as e:
                 st.error(str(e))
                 snap_df, used_quarter, snap_message = pd.DataFrame(), selected_quarter, None
@@ -1306,7 +1355,7 @@ with tab_commercial:
 
                     try:
                         with st.spinner("추이 조회 중..."):
-                            trend_df, trend_message = get_reb_vacancy_trend(
+                            trend_df, trend_message = _load_reb_vacancy_trend(
                                 reb_key, statbl_id, cls_id, "202403", latest_quarter,
                             )
                     except Exception as e:
@@ -1386,7 +1435,7 @@ with tab_sangkwon:
                     lon, lat = coord
                     try:
                         with st.spinner("주변 상가업소 조회 중..."):
-                            stores_df = get_nearby_stores(
+                            stores_df = _load_nearby_stores(
                                 sangkwon_key, lon, lat, radius=int(radius),
                                 inds_lcls_cd=lcls_cd, inds_mcls_cd=mcls_cd, inds_scls_cd=scls_cd,
                             )
@@ -1881,13 +1930,18 @@ with tab_autopptx:
                         },
                         ledger_docs=st.session_state.get("ledger_docs"),
                         progress_callback=_on_report_progress,
-                        # 동단위통계·노후건축물·공시가격시계열·서울상권분석 탭이 쓰는 것과
-                        # 같은 @st.cache_data 래퍼를 넘긴다 — 그 탭들을 이 리포트보다 먼저
-                        # 조회해뒀다면 캐시를 맞아 API 재호출 없이 즉시 재사용된다.
+                        # 동단위통계·노후건축물·실거래가·공실률·상가업소·서울상권분석 탭이 쓰는
+                        # 것과 같은 @st.cache_data 래퍼를 넘긴다 — 그 탭들을 이 리포트보다 먼저,
+                        # 그리고 이 리포트가 필요로 하는 것과 같은 조건으로 조회해뒀다면 캐시를
+                        # 맞아 API 재호출 없이 즉시 재사용된다.
                         district_title_loader=_load_district_titles,
                         district_price_loader=_load_district_prices,
                         seoul_locations_loader=_load_seoul_trade_area_locations,
                         seoul_quarter_loader=_load_seoul_quarter_dataset,
+                        transaction_loader=lambda **kw: _load_transaction_price(service_key, **kw),
+                        vacancy_snapshot_loader=_load_reb_vacancy_snapshot,
+                        vacancy_trend_loader=_load_reb_vacancy_trend,
+                        stores_loader=_load_nearby_stores,
                         single_report=reusable_report,
                     )
                 progress_box.empty()

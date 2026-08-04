@@ -570,11 +570,21 @@ def _fetch_data_go_kr_envelope(url: str, params: dict, retries: int = 4, timeout
       본문이 JSON으로 온 사례가 실제 확인됨) 놓치지 않고 원래 오류 메시지를 그대로 보여준다.
     """
     res = None
+    last_conn_error = None
     for attempt in range(retries):
-        res = requests.get(url, params=params, verify=False, timeout=timeout)
-        if res.status_code not in _DATA_GO_KR_TRANSIENT_STATUS or attempt == retries - 1:
+        try:
+            res = requests.get(url, params=params, verify=False, timeout=timeout)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            last_conn_error = e
+            res = None
+        if res is not None and res.status_code not in _DATA_GO_KR_TRANSIENT_STATUS:
+            break
+        if attempt == retries - 1:
             break
         time.sleep(1.0 * (attempt + 1))
+
+    if res is None:
+        raise Exception(f"data.go.kr 서버에 연결하지 못했습니다(재시도 {retries}회 실패): {last_conn_error}")
 
     try:
         parsed = xmltodict.parse(res.text)
@@ -1429,7 +1439,15 @@ def _sangkwon_request(service_key: str, operation: str, **params):
     """
     url = f"{SANGKWON_API_BASE}/{operation}"
     query = {"serviceKey": service_key, "type": "json", **params}
-    res = requests.get(url, params=query, timeout=15)
+    res = None
+    for attempt in range(3):
+        try:
+            res = requests.get(url, params=query, timeout=15)
+            break
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            if attempt == 2:
+                raise RuntimeError(f"소상공인시장진흥공단 서버에 연결하지 못했습니다(재시도 3회 실패): {e}")
+            time.sleep(1.0 * (attempt + 1))
     res.raise_for_status()
     try:
         data = res.json()
@@ -1522,7 +1540,15 @@ def _seoul_request(seoul_key: str, service: str, start: int, end: int, extra_pat
     if extra_path:
         parts.append(str(extra_path))
     url = "/".join(parts) + "/"
-    res = requests.get(url, timeout=15)
+    res = None
+    for attempt in range(3):
+        try:
+            res = requests.get(url, timeout=15)
+            break
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            if attempt == 2:
+                raise RuntimeError(f"서울 열린데이터광장 서버에 연결하지 못했습니다(재시도 3회 실패): {e}")
+            time.sleep(1.0 * (attempt + 1))
     res.raise_for_status()
     try:
         data = res.json()
@@ -1734,7 +1760,15 @@ def get_golmok_road_flow(lon: float, lat: float, radius_m: float = 350, timeout:
         "wkt": "", "dayweek": "1", "agrde": "00", "tmzon": "00",
         "ext": "ext", "signguCd": "11",
     }
-    res = requests.post(GOLMOK_FPOP_URL, headers=headers, data=data, timeout=timeout)
+    res = None
+    for attempt in range(3):
+        try:
+            res = requests.post(GOLMOK_FPOP_URL, headers=headers, data=data, timeout=timeout)
+            break
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            if attempt == 2:
+                raise RuntimeError(f"golmok.seoul.go.kr 서버에 연결하지 못했습니다(재시도 3회 실패): {e}")
+            time.sleep(1.0 * (attempt + 1))
     res.raise_for_status()
     try:
         return res.json()
@@ -2069,6 +2103,7 @@ def match_transactions_to_parcel(
     kakao_key: str = None,
     target_coord=None,
     radius_m: float = 200,
+    transaction_loader=None,
 ) -> dict:
     """추정된 property_type으로 최근 N개월 실거래가를 받아, 대상 좌표(target_coord) 기준
 
@@ -2090,10 +2125,16 @@ def match_transactions_to_parcel(
     start_ym = (end - datetime.timedelta(days=30 * months_lookback)).strftime("%Y%m")
 
     try:
-        df = tp_api.get_data(
-            property_type=property_type, trade_type=trade_type,
-            sigungu_code=sigungu_code, start_year_month=start_ym, end_year_month=end_ym,
-        )
+        if transaction_loader:
+            df = transaction_loader(
+                property_type=property_type, trade_type=trade_type,
+                sigungu_code=sigungu_code, start_year_month=start_ym, end_year_month=end_ym,
+            )
+        else:
+            df = tp_api.get_data(
+                property_type=property_type, trade_type=trade_type,
+                sigungu_code=sigungu_code, start_year_month=start_ym, end_year_month=end_ym,
+            )
     except Exception as e:
         return {"status": "error", "df": None, "note": str(e)}
 
@@ -2169,6 +2210,7 @@ def build_master_report(
     kakao_key: str = None,
     transactions_radius_m: float = 200,
     prefetched_ledgers: dict = None,
+    transaction_loader=None,
 ) -> dict:
     """지번 하나에 대해 단일조회·실거래가·노후도·내진·공시가격(+선택적 동단위 비교)을 한 번에 모은 종합 리포트
 
@@ -2225,6 +2267,7 @@ def build_master_report(
             tp_api, ptype, "매매", sigungu_code, bun, ji, months_lookback=months_lookback,
             sido=sido, sigungu_name=sigungu_name, dong_name=dong_name,
             kakao_key=kakao_key, target_coord=result["좌표"], radius_m=transactions_radius_m,
+            transaction_loader=transaction_loader,
         )
         result["노후도"] = analyze_old_buildings(title_df, min_age_years=0)
         result["내진분석"] = analyze_seismic_risk(title_df, top_n=1)
