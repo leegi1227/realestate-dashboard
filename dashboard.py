@@ -14,6 +14,7 @@ import datetime
 import io
 import math
 import os
+import re
 
 import pandas as pd
 import streamlit as st
@@ -185,6 +186,55 @@ def _read_uploaded_table(uploaded_file) -> pd.DataFrame:
         uploaded_file.seek(0)
         return pd.read_csv(uploaded_file, encoding="cp949", encoding_errors="replace")
     return pd.read_excel(uploaded_file)
+
+
+_JIBUN_EN_MONTHS = {
+    "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+    "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
+}
+
+
+def _restore_jibun(value) -> str:
+    """국토부 실거래가 CSV/xls의 '지번' 값을 복원한다.
+
+    지번(본번-부번)이 엑셀에서 날짜로 자동 서식 변환되는 경우가 있다:
+    부번이 31 초과면 'Sep-65'(MMM-YY, 본번=월·부번=2자리연도)로, 31 이하면
+    '03월 25일'(M월D일, 본번=월·부번=일)로 바뀐다. .xls는 이미 실제 날짜 값으로
+    읽히므로 연도로 두 패턴을 구분하고(1930~1999→ MMM-YY), CSV는 문자열 그대로
+    남아있으므로 정규식으로 구분한다. 마스킹된 지번("9*")은 복원 불가 — 그대로 둔다.
+    """
+    if isinstance(value, (pd.Timestamp, datetime.datetime, datetime.date)):
+        ts = pd.Timestamp(value)
+        if 1930 <= ts.year <= 1999:
+            return f"{ts.month}-{ts.year % 100}"
+        return f"{ts.month}-{ts.day}"
+    text = str(value).strip()
+    m = re.match(r"^([A-Za-z]{3})-(\d{1,2})$", text)
+    if m:
+        month = _JIBUN_EN_MONTHS.get(m.group(1).title())
+        if month:
+            return f"{month}-{m.group(2)}"
+    m = re.match(r"^(\d{1,2})월\s?(\d{1,2})일$", text)
+    if m:
+        return f"{int(m.group(1))}-{int(m.group(2))}"
+    return text
+
+
+def _find_col(columns, names) -> str | None:
+    return next((c for c in columns if str(c).strip().lower() in names), None)
+
+
+def _ensure_address_column(df: pd.DataFrame) -> pd.DataFrame | None:
+    """'주소' 계열 컬럼이 없으면 국토부 실거래가 포맷(시군구+지번)에서 합성을 시도한다."""
+    sgg_col = _find_col(df.columns, {"시군구", "sigungu"})
+    jibun_col = _find_col(df.columns, {"지번", "jibun", "번지"})
+    if not sgg_col or not jibun_col:
+        return None
+    df = df.copy()
+    df["주소"] = (
+        df[sgg_col].astype(str).str.strip() + " " + df[jibun_col].map(_restore_jibun)
+    )
+    return df
 
 
 def render_address_map(
@@ -1266,6 +1316,12 @@ with tab_geocode:
             if geo_df is not None:
                 _addr_names = {"주소", "address", "지번주소", "도로명주소"}
                 addr_col = next((c for c in geo_df.columns if str(c).strip().lower() in _addr_names), None)
+                if not addr_col:
+                    synthesized = _ensure_address_column(geo_df)
+                    if synthesized is not None:
+                        geo_df = synthesized
+                        addr_col = "주소"
+                        st.caption("'시군구'+'지번' 컬럼에서 주소를 자동 합성했습니다 (국토부 실거래가 포맷).")
                 if not addr_col:
                     st.error("주소로 보이는 컬럼을 찾지 못했습니다. 컬럼명을 '주소'로 바꿔서 다시 올려주세요.")
                     st.dataframe(geo_df.head(20), width='stretch')
