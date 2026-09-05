@@ -201,7 +201,9 @@ def _restore_jibun(value) -> str:
     부번이 31 초과면 'Sep-65'(MMM-YY, 본번=월·부번=2자리연도)로, 31 이하면
     '03월 25일'(M월D일, 본번=월·부번=일)로 바뀐다. .xls는 이미 실제 날짜 값으로
     읽히므로 연도로 두 패턴을 구분하고(1930~1999→ MMM-YY), CSV는 문자열 그대로
-    남아있으므로 정규식으로 구분한다. 마스킹된 지번("9*")은 복원 불가 — 그대로 둔다.
+    남아있으므로 정규식으로 구분한다. 마스킹된 지번("9*")은 부번이 통째로 가려진
+    것이라 정확한 부번은 복원 불가하지만, 본번("9")만으로도 지오코딩 API가 그
+    본번의 대표 위치를 찾아주는 경우가 많아 본번만 남겨서 근사 지오코딩을 시도한다.
     """
     if isinstance(value, (pd.Timestamp, datetime.datetime, datetime.date)):
         ts = pd.Timestamp(value)
@@ -217,6 +219,9 @@ def _restore_jibun(value) -> str:
     m = re.match(r"^(\d{1,2})월\s?(\d{1,2})일$", text)
     if m:
         return f"{int(m.group(1))}-{int(m.group(2))}"
+    m = re.match(r"^(\d+)-?\*+$", text)
+    if m:
+        return m.group(1)
     return text
 
 
