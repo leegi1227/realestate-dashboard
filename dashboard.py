@@ -1331,6 +1331,20 @@ with tab_geocode:
                     st.error("주소로 보이는 컬럼을 찾지 못했습니다. 컬럼명을 '주소'로 바꿔서 다시 올려주세요.")
                     st.dataframe(geo_df.head(20), width='stretch')
                 else:
+                    frac_col = _find_col(geo_df.columns, {"지분구분"})
+                    if frac_col:
+                        before = len(geo_df)
+                        geo_df = geo_df[geo_df[frac_col].astype(str).str.strip() != "지분"].reset_index(drop=True)
+                        dropped = before - len(geo_df)
+                        if dropped:
+                            st.caption(f"지분 거래 {dropped}건을 제외했습니다.")
+
+                    before_dedup = len(geo_df)
+                    geo_df = geo_df.drop_duplicates(subset=[addr_col]).reset_index(drop=True)
+                    merged = before_dedup - len(geo_df)
+                    if merged:
+                        st.caption(f"중복 주소 {merged}건을 1건으로 합쳤습니다. (남은 {len(geo_df)}건)")
+
                     if st.button("전체 좌표 조회", type="primary", key="geo_batch_submit"):
                         work_df = geo_df[[addr_col]].rename(columns={addr_col: "주소"})
                         geo_progress = st.progress(0.0, text="지오코딩 준비 중...")
