@@ -172,6 +172,21 @@ def _road_flow_to_map_payload(road_df: pd.DataFrame) -> list:
     return payload
 
 
+def _read_uploaded_table(uploaded_file) -> pd.DataFrame:
+    """CSV/엑셀 업로드 파일을 읽는다. 국토부·공공기관 CSV는 UTF-8이 아닌
+    CP949(EUC-KR)로 배포되는 경우가 많아, UTF-8 계열 실패 시 CP949로 재시도한다."""
+    if uploaded_file.name.lower().endswith(".csv"):
+        for encoding in ("utf-8-sig", "cp949"):
+            uploaded_file.seek(0)
+            try:
+                return pd.read_csv(uploaded_file, encoding=encoding)
+            except UnicodeDecodeError:
+                continue
+        uploaded_file.seek(0)
+        return pd.read_csv(uploaded_file, encoding="cp949", encoding_errors="replace")
+    return pd.read_excel(uploaded_file)
+
+
 def render_address_map(
     df: pd.DataFrame,
     lat_col: str = "lat",
@@ -1102,10 +1117,7 @@ with tab_map:
 
     if uploaded is not None:
         try:
-            if uploaded.name.lower().endswith(".csv"):
-                map_df = pd.read_csv(uploaded)
-            else:
-                map_df = pd.read_excel(uploaded)
+            map_df = _read_uploaded_table(uploaded)
         except Exception as e:
             st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
             map_df = None
@@ -1246,10 +1258,7 @@ with tab_geocode:
 
         if geo_file is not None:
             try:
-                if geo_file.name.lower().endswith(".csv"):
-                    geo_df = pd.read_csv(geo_file)
-                else:
-                    geo_df = pd.read_excel(geo_file)
+                geo_df = _read_uploaded_table(geo_file)
             except Exception as e:
                 st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
                 geo_df = None
