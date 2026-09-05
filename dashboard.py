@@ -1346,11 +1346,16 @@ with tab_geocode:
         batch_result = st.session_state.get("geo_batch_result")
         if batch_result is not None:
             found = int(batch_result["위도"].notna().sum())
-            st.success(f"{found}/{len(batch_result)}건 좌표를 찾았습니다.")
-            if found == 0 and "좌표조회실패사유" in batch_result.columns:
-                top_reason = batch_result["좌표조회실패사유"].dropna().mode()
-                if not top_reason.empty:
-                    st.error(f"공통 실패 사유: {top_reason.iloc[0]}")
+            total = len(batch_result)
+            st.success(f"{found}/{total}건 좌표를 찾았습니다.")
+            if found < total and "좌표조회실패사유" in batch_result.columns:
+                reason_counts = batch_result["좌표조회실패사유"].dropna().value_counts()
+                if not reason_counts.empty:
+                    with st.expander(f"실패 사유 확인 ({total - found}건)"):
+                        st.dataframe(
+                            reason_counts.rename("건수").rename_axis("실패 사유").reset_index(),
+                            width='stretch',
+                        )
             st.dataframe(batch_result, width='stretch')
             csv_bytes = batch_result.to_csv(index=False).encode("utf-8-sig")
             st.download_button(
